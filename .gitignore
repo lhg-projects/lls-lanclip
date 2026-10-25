@@ -12,3 +12,9 @@ received/
 Thumbs.db
 .idea/
 .vscode/
+
+# android build caches
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
