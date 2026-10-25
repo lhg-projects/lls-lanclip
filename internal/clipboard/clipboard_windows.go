@@ -32,13 +32,14 @@ var (
 	procCreateWindow = user32.NewProc("CreateWindowExW")
 	procDefWindow    = user32.NewProc("DefWindowProcW")
 	procRegisterCls  = user32.NewProc("RegisterClassExW")
-	shell32          = syscall.NewLazyDLL("shell32.dll")
-	procDragQuery    = shell32.NewProc("DragQueryFileW")
 	kernel32         = syscall.NewLazyDLL("kernel32.dll")
 	procGlobalAlloc  = kernel32.NewProc("GlobalAlloc")
 	procGlobalLock   = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock = kernel32.NewProc("GlobalUnlock")
 	procGlobalSize   = kernel32.NewProc("GlobalSize")
+	procMoveMemory   = kernel32.NewProc("RtlMoveMemory")
+	shell32          = syscall.NewLazyDLL("shell32.dll")
+	procDragQuery    = shell32.NewProc("DragQueryFileW")
 )
 
 const (
@@ -74,8 +75,12 @@ func readText() (string, bool) {
 	if p == 0 {
 		return "", false
 	}
-	defer procGlobalUnlock.Call(h)
-	raw := unsafe.Slice((*uint16)(unsafe.Pointer(p)), size/2)
+	defer procGlobalUnlock.Call(h) //nolint:errcheck
+	// copy into a Go buffer via RtlMoveMemory so no uintptr->unsafe.Pointer
+	// conversion ever happens (go vet unsafeptr-clean)
+	buf := make([]byte, size)
+	procMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), p, size) //nolint:gosec
+	raw := unsafe.Slice((*uint16)(unsafe.Pointer(&buf[0])), size/2)
 	n := 0
 	for raw[n] != 0 && n < len(raw)-1 {
 		n++
@@ -116,9 +121,10 @@ func readImage() ([]byte, error) {
 	if p == 0 {
 		return nil, fmt.Errorf("GlobalLock failed")
 	}
-	defer procGlobalUnlock.Call(h)
-
-	dib := unsafe.Slice((*byte)(unsafe.Pointer(p)), size)
+	defer procGlobalUnlock.Call(h) //nolint:errcheck
+	// copy into a Go buffer; keep p as uintptr end to end (vet-clean)
+	dib := make([]byte, size)
+	procMoveMemory.Call(uintptr(unsafe.Pointer(&dib[0])), p, size) //nolint:gosec
 	width := int(int32(binary.LittleEndian.Uint32(dib[4:8])))
 	height := int(int32(binary.LittleEndian.Uint32(dib[8:12])))
 	bpp := int(binary.LittleEndian.Uint16(dib[14:16]))
@@ -269,11 +275,11 @@ type wndClassEx struct {
 	HIconSm       uintptr
 }
 
-var windows = map[uintptr]*Watcher{}
+var watchers = map[uintptr]*Watcher{}
 
 func wndProcThunk(hwnd, msg, wp, lp uintptr) uintptr {
 	if msg == wmClipboard {
-		if w := windows[hwnd]; w != nil {
+		if w := watchers[hwnd]; w != nil {
 			go w.onChange() // don't block the window pump on conversions
 		}
 	}
@@ -299,7 +305,7 @@ func NewWatcher(cb func(Update)) (*Watcher, error) {
 		return nil, fmt.Errorf("CreateWindowExW: %v", err)
 	}
 	w.hwnd = hwnd
-	windows[hwnd] = w
+	watchers[hwnd] = w
 	if r, _, err := procAddListener.Call(hwnd); r == 0 {
 		return nil, fmt.Errorf("AddClipboardFormatListener: %v", err)
 	}
@@ -368,8 +374,9 @@ func WriteText(s string) bool {
 	if p == 0 {
 		return false
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(p)), size), u16Bytes(u16))
-	procGlobalUnlock.Call(h)
+	src := u16Bytes(u16)
+	procMoveMemory.Call(p, uintptr(unsafe.Pointer(&src[0])), uintptr(size)) //nolint:gosec
+	procGlobalUnlock.Call(h)                                                //nolint:errcheck
 	r, _, _ := procSetClipData.Call(cfUnicodeText, h)
 	return r != 0
 }
@@ -406,10 +413,26 @@ func WriteImage(pngBytes []byte) bool {
 	if p == 0 {
 		return false
 	}
-	dib := unsafe.Slice((*byte)(unsafe.Pointer(p)), total)
+	dib := make([]byte, total)
+	copyDibInto(dib, img, w, h)
+	procMoveMemory.Call(p, uintptr(unsafe.Pointer(&dib[0])), uintptr(total)) //nolint:gosec
+	procGlobalUnlock.Call(hg)                                                //nolint:errcheck
 
+	if r, _, _ := procOpenClip.Call(0); r == 0 {
+		return false
+	}
+	defer procCloseClip.Call()
+	procEmptyClip.Call()
+	rv, _, _ := procSetClipData.Call(cfDIBV5, hg)
+	return rv != 0
+}
+
+// copyDibInto renders img into a preallocated BITMAPV5HEADER + bottom-up
+// 32bpp BGRA pixel buffer.
+func copyDibInto(dib []byte, img image.Image, w, h int) {
+	const hdrSize = 124
+	stride := w * 4
 	le := binary.LittleEndian
-	// BITMAPV5HEADER
 	le.PutUint32(dib[0:4], hdrSize)
 	le.PutUint32(dib[4:8], uint32(w))
 	le.PutUint32(dib[8:12], uint32(h)) // positive => bottom-up
@@ -422,25 +445,16 @@ func WriteImage(pngBytes []byte) bool {
 	le.PutUint32(dib[48:52], 0xFF)     // blue mask
 	le.PutUint32(dib[52:56], 0xFF000000)
 	le.PutUint32(dib[56:60], 0x73524742) // 'sRGB'
-
+	b := img.Bounds()
 	for y := 0; y < h; y++ {
 		dstY := h - 1 - y // flip to bottom-up
 		row := dib[hdrSize+dstY*stride:]
 		for x := 0; x < w; x++ {
-			r, g, b, a := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			row[x*4+0] = byte(b >> 8)
+			r, g, bl, a := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			row[x*4+0] = byte(bl >> 8)
 			row[x*4+1] = byte(g >> 8)
 			row[x*4+2] = byte(r >> 8)
 			row[x*4+3] = byte(a >> 8)
 		}
 	}
-	procGlobalUnlock.Call(hg)
-
-	if r, _, _ := procOpenClip.Call(0); r == 0 {
-		return false
-	}
-	defer procCloseClip.Call()
-	procEmptyClip.Call()
-	rv, _, _ := procSetClipData.Call(cfDIBV5, hg)
-	return rv != 0
 }
