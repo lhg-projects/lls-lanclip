@@ -10,7 +10,7 @@ vet:
 	go vet ./...
 
 test: vet
-	go test ./... || true
+	go test ./...
 
 release: clean
 	GOOS=darwin  GOARCH=arm64 go build -ldflags "-s -w" -o dist/lanclip-darwin-arm64       ./cmd/lanclip

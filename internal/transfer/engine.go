@@ -1,6 +1,7 @@
 // Package transfer implements the peer session: TLS 1.3 transport, hello
-// authentication against the group key, clipboard frames, and streaming file
-// transfer with per-chunk ACK (never buffering whole files in memory).
+// authentication bound to the TLS channel via the exporter, clipboard frames,
+// and streaming file transfer (per-chunk sha256 + strictly-sequential offsets
+// + whole-file sha256; memory stays flat regardless of file size).
 package transfer
 
 import (
@@ -60,9 +61,8 @@ type Engine struct {
 	cfg    Config
 	tlsCfg *tls.Config
 
-	mu       sync.Mutex
-	seenVer  map[string]uint64 // deviceID -> last accepted version
-	pinnedFP map[string]bool   // known peer cert fingerprints (TOFU)
+	mu      sync.Mutex
+	seenVer map[string]uint64 // deviceID -> last accepted version
 }
 
 // NewEngine prepares TLS material and state.
@@ -72,32 +72,18 @@ func NewEngine(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{
-		cfg:      cfg,
-		seenVer:  map[string]uint64{},
-		pinnedFP: map[string]bool{},
+		cfg:     cfg,
+		seenVer: map[string]uint64{},
 	}
 	e.tlsCfg = &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 		ServerName:   "lanclip_" + cfg.DeviceID,
-		// Peers authenticate via the group-key HMAC in Hello, so OS chain
-		// verification is replaced by explicit TOFU pinning: the first time a
-		// fingerprint is seen it is remembered; mismatches abort the handshake.
-		InsecureSkipVerify: true, //nolint:gosec — auth is HMAC(groupKey)+TOFU pin, see above
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return errStr("no peer certificate")
-			}
-			sum := sha256.Sum256(rawCerts[0])
-			fp := hex.EncodeToString(sum[:])
-			e.mu.Lock()
-			_, known := e.pinnedFP[fp]
-			if !known {
-				e.pinnedFP[fp] = true
-			}
-			e.mu.Unlock()
-			return nil
-		},
+		// Certificates are per-install self-signed, so chain verification is
+		// skipped; peer authentication is the hello HMAC computed over the TLS
+		// exporter of this very connection (see crypto.HelloTag), which a
+		// relay/MITM cannot reproduce on its own legs.
+		InsecureSkipVerify: true, //nolint:gosec — auth is the channel-bound HMAC, see above
 	}
 	return e, nil
 }
@@ -269,6 +255,10 @@ func (c *conn) recvChunk() (fileID string, offset int64, data []byte, hashOK boo
 	if err != nil {
 		return
 	}
+	if length <= 0 || length > protocol.ChunkSize {
+		err = protocol.ErrBadHeader
+		return
+	}
 	data = make([]byte, length)
 	if _, err = io.ReadFull(c.rw, data); err != nil {
 		return
@@ -304,7 +294,13 @@ func (e *Engine) handleInbound(raw net.Conn) {
 	if err := c.recvJSON(protocol.MsgHello, &hello); err != nil {
 		return
 	}
-	if !e.cfg.InsecureOpen && !crypto.VerifyAuthTag(e.cfg.GroupKey, hello.DeviceID, hello.AuthTag) {
+	st := t.ConnectionState()
+	exp, err := st.ExportKeyingMaterial(crypto.ExporterLabel, nil, 32)
+	if err != nil {
+		e.logf("exporter: %v", err)
+		return
+	}
+	if !e.cfg.InsecureOpen && !crypto.VerifyHelloTag(e.cfg.GroupKey, hello.DeviceID, hello.AuthTag, exp) {
 		e.logf("rejected peer %s: bad auth tag", hello.DeviceID)
 		c.sendJSON(protocol.MsgError, map[string]any{"reason": "auth"})
 		return
@@ -319,44 +315,6 @@ func (e *Engine) handleInbound(raw net.Conn) {
 	if e.cfg.OnPeerDisconnected != nil {
 		e.cfg.OnPeerDisconnected(hello.DeviceName)
 	}
-}
-
-// Dial connects outbound to a discovered peer.
-func (e *Engine) Dial(addr string) error {
-	t := tls.Client(nil, e.tlsCfg)
-	// tls.Client needs the raw conn; rebuild properly:
-	raw, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	t = tls.Client(raw, e.tlsCfg)
-	if err := t.Handshake(); err != nil {
-		raw.Close()
-		return err
-	}
-	c := wrap(t)
-	hello := protocol.Hello{
-		DeviceID:   e.cfg.DeviceID,
-		DeviceName: e.cfg.DeviceName,
-		Platform:   e.cfg.Platform,
-		Version:    e.cfg.Version,
-		AuthTag:    crypto.AuthTag(e.cfg.GroupKey, e.cfg.DeviceID),
-	}
-	if err := c.sendJSON(protocol.MsgHello, hello); err != nil {
-		t.Close()
-		return err
-	}
-	var ok struct{ OK bool `json:"ok"` }
-	if err := c.recvJSON(protocol.MsgHelloOK, &ok); err != nil || !ok.OK {
-		t.Close()
-		return fmt.Errorf("peer rejected hello")
-	}
-	if e.cfg.OnPeerConnected != nil {
-		e.cfg.OnPeerConnected(e.cfg.DeviceName + " (outbound)")
-	}
-	e.serve(c, hello)
-	t.Close()
-	return nil
 }
 
 // serve runs the receive loop until the peer disconnects or errors.
@@ -393,6 +351,11 @@ func (e *Engine) serve(c *conn, peer protocol.Hello) {
 			if err := json.Unmarshal(env.Body, &m); err != nil {
 				return
 			}
+			if m.Size > protocol.MaxInlineImage {
+				e.logf("image %s too large for clipboard (%d bytes > %d), skipped", m.FileID, m.Size, protocol.MaxInlineImage)
+				c.sendJSON(protocol.MsgError, map[string]any{"reason": "image too large"})
+				return
+			}
 			png, err := e.pullFile(c, m.FileID, m.Size, m.SHA256, "")
 			if err != nil {
 				e.logf("pull image %s: %v", m.FileID, err)
@@ -408,7 +371,7 @@ func (e *Engine) serve(c *conn, peer protocol.Hello) {
 			}
 			paths := make([]string, 0, len(m.Files))
 			for _, fe := range m.Files {
-				dst := filepath.Join(e.cfg.SaveDir, fe.Name)
+				dst := filepath.Join(e.cfg.SaveDir, SanitizeFileName(fe.Name))
 				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 					return
 				}
@@ -468,6 +431,9 @@ func (e *Engine) SendText(addr, text string) error {
 
 // SendImage streams a PNG as an image-ref so the receiver can paste it.
 func (e *Engine) SendImage(addr string, png []byte) error {
+	if int64(len(png)) > protocol.MaxInlineImage {
+		return fmt.Errorf("image exceeds clipboard cap (%d > %d bytes)", len(png), protocol.MaxInlineImage)
+	}
 	t, c, err := e.dialHello(addr)
 	if err != nil {
 		return err
@@ -557,18 +523,26 @@ func (e *Engine) dialHello(addr string) (*tls.Conn, *conn, error) {
 		return nil, nil, err
 	}
 	c := wrap(t)
+	st := t.ConnectionState()
+	exp, err := st.ExportKeyingMaterial(crypto.ExporterLabel, nil, 32)
+	if err != nil {
+		t.Close()
+		return nil, nil, err
+	}
 	hello := protocol.Hello{
 		DeviceID:   e.cfg.DeviceID,
 		DeviceName: e.cfg.DeviceName,
 		Platform:   e.cfg.Platform,
 		Version:    e.cfg.Version,
-		AuthTag:    crypto.AuthTag(e.cfg.GroupKey, e.cfg.DeviceID),
+		AuthTag:    crypto.HelloTag(e.cfg.GroupKey, e.cfg.DeviceID, exp),
 	}
 	if err := c.sendJSON(protocol.MsgHello, hello); err != nil {
 		t.Close()
 		return nil, nil, err
 	}
-	var ok struct{ OK bool `json:"ok"` }
+	var ok struct {
+		OK bool `json:"ok"`
+	}
 	if err := c.recvJSON(protocol.MsgHelloOK, &ok); err != nil || !ok.OK {
 		t.Close()
 		return nil, nil, fmt.Errorf("peer rejected hello")
@@ -589,8 +563,9 @@ func (e *Engine) pushBytes(c *conn, fileID string, data []byte) error {
 	return nil
 }
 
-// pushFileStream streams a file from disk in fixed chunks with per-chunk ACK,
-// keeping memory flat no matter the file size (report §6).
+// pushFileStream streams a file from disk in fixed chunks, keeping memory
+// flat no matter the file size; reliability is TCP flow control + per-chunk
+// sha256 verified on receipt + whole-file sha256 at the end (report §6).
 func (e *Engine) pushFileStream(c *conn, fe protocol.FileEntry, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -637,12 +612,18 @@ func (e *Engine) pullFile(c *conn, fileID string, size int64, wantSHA string, ds
 	}
 	var received int64
 	for received < size {
-		_, _, chunk, hashOK, err := c.recvChunk()
+		_, offset, chunk, hashOK, err := c.recvChunk()
 		if err != nil {
 			return nil, err
 		}
+		if offset != received {
+			return nil, fmt.Errorf("chunk offset %d out of order (want %d)", offset, received)
+		}
 		if !hashOK {
 			return nil, fmt.Errorf("chunk hash mismatch")
+		}
+		if received+int64(len(chunk)) > size {
+			return nil, fmt.Errorf("chunk overruns announced size")
 		}
 		received += int64(len(chunk))
 		h.Write(chunk)
@@ -665,4 +646,25 @@ func (e *Engine) pullFile(c *conn, fileID string, size int64, wantSHA string, ds
 		return nil, nil
 	}
 	return buf, nil
+}
+
+// SanitizeFileName clamps a remote-supplied file name into a single safe
+// path element: remote manifests are untrusted input and must never be able
+// to escape SaveDir via "../", absolute paths, backslashes, or NUL bytes.
+func SanitizeFileName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimSuffix(name, "/")
+	name = filepath.Base(name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, 0) {
+		return "unnamed-file"
+	}
+	if len(name) > 200 {
+		ext := filepath.Ext(name)
+		if len(ext) > 32 {
+			ext = ext[:32]
+		}
+		name = name[:200-len(ext)] + ext
+	}
+	return name
 }

@@ -3,8 +3,9 @@
 // Model (chosen after reviewing how WeType pairs devices, see report §3-4):
 //   - a shared group key (random 32 bytes) is the root of trust; it is set on
 //     the first device and copied to others via a 6-digit PIN during pairing;
-//   - hello frames are authenticated with HMAC(groupKey) so a stranger on the
-//     same LAN cannot even complete a handshake;
+//   - hello frames are authenticated with HMAC(groupKey) bound to the TLS
+//     exporter of the live connection, so a stranger on the same LAN cannot
+//     complete a handshake and a MITM relay cannot replay a valid tag;
 //   - each connection is wrapped in TLS 1.3 (self-signed certs) so traffic on
 //     the wire is encrypted independent of the group key;
 //   - file content is additionally XOR-masked per session only as obfuscation;
@@ -47,17 +48,24 @@ func NewDeviceID() string {
 	return hex.EncodeToString(b)
 }
 
-// AuthTag computes the hello-frame authenticator.
-func AuthTag(groupKey []byte, deviceID string) string {
+// ExporterLabel is the TLS exporter label used for channel binding.
+const ExporterLabel = "lanclip hello v2"
+
+// HelloTag computes the channel-bound hello authenticator. exporter must be
+// the TLS exporter value of the SAME connection the hello frame travels on;
+// a tag captured or relayed over any other connection never validates, which
+// defeats TLS-MITM relays against our self-signed certificates.
+func HelloTag(groupKey []byte, deviceID string, exporter []byte) string {
 	m := hmac.New(sha256.New, groupKey)
-	m.Write([]byte("lanclip-hello-v1"))
+	m.Write([]byte("lanclip-hello-v2"))
+	m.Write(exporter)
 	m.Write([]byte(deviceID))
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// VerifyAuthTag checks a hello authenticator in constant time.
-func VerifyAuthTag(groupKey []byte, deviceID, tag string) bool {
-	expected := AuthTag(groupKey, deviceID)
+// VerifyHelloTag checks a hello authenticator in constant time.
+func VerifyHelloTag(groupKey []byte, deviceID, tag string, exporter []byte) bool {
+	expected := HelloTag(groupKey, deviceID, exporter)
 	return hmac.Equal([]byte(expected), []byte(tag))
 }
 

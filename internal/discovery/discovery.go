@@ -38,9 +38,9 @@ type Announcer struct {
 // Announce starts mDNS advertising on all interfaces.
 func Announce(deviceID, deviceName, platform, version string, port int) (*Announcer, error) {
 	server, err := zeroconf.Register(
-		deviceName,              // instance name
-		protocolService(),       // service type
-		"local.",                // domain
+		deviceName,        // instance name
+		protocolService(), // service type
+		"local.",          // domain
 		port,
 		[]string{fmt.Sprintf("%s=%s", txtDeviceID, deviceID), fmt.Sprintf("%s=%s", txtPlatform, platform), fmt.Sprintf("%s=%s", txtVersion, version)},
 		nil, // all interfaces

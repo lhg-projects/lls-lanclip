@@ -111,7 +111,7 @@ import (
 // Update is one observed clipboard change.
 type Update struct {
 	Text    string
-	PNGData []byte // non-nil when the change carried an image
+	PNGData []byte   // non-nil when the change carried an image
 	Files   []string // local file paths when files were copied (NSFilenamesPboardType)
 }
 

@@ -7,8 +7,9 @@
 //     drop echo/stale updates (WeType: "ignore clipboard echoed from current
 //     device" / "ignore duplicate or stale clipboard");
 //   - file payloads never travel through these frames: the manifest announces
-//     files, then each file streams in fixed-size chunks with per-chunk ACK,
-//     so memory stays flat regardless of file size.
+//     files, then each file streams in fixed-size chunks (per-chunk sha256,
+//     strictly sequential offsets, whole-file sha256 at the end), so memory
+//     stays flat regardless of file size.
 package protocol
 
 import "encoding/binary"
@@ -19,6 +20,12 @@ const (
 
 	// ChunkSize is the streaming unit for file payloads.
 	ChunkSize = 256 << 10 // 256 KiB
+
+	// MaxInlineImage caps clipboard images, which buffer in memory on the
+	// receiving side (files stream to disk and have no such cap). WeType
+	// caps clipboard images at 100MB for its cloud path; on a LAN 32MB is
+	// already far beyond any real screenshot.
+	MaxInlineImage = 32 << 20 // 32 MiB
 
 	// MaxChunkAckBacklog bounds unacked chunks in flight.
 	MaxChunkAckBacklog = 8
@@ -87,11 +94,11 @@ type ImageRef struct {
 
 // FileEntry describes one file inside a manifest.
 type FileEntry struct {
-	FileID   string `json:"file_id"`
-	Name     string `json:"name"`
-	Size     int64  `json:"size"`
-	SHA256   string `json:"sha256"`
-	IsImage  bool   `json:"is_image,omitempty"` // image goes to clipboard, not save dir
+	FileID  string `json:"file_id"`
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"`
+	IsImage bool   `json:"is_image,omitempty"` // image goes to clipboard, not save dir
 }
 
 // Manifest announces the file batch about to stream.
@@ -152,7 +159,7 @@ func DecodeChunkHeader(b []byte) (fileID string, offset int64, length int, hash 
 
 // Framing errors.
 var (
-	ErrBadHeader = errStr("bad chunk header")
+	ErrBadHeader     = errStr("bad chunk header")
 	ErrFrameTooLarge = errStr("frame exceeds MaxFrameSize")
 )
 

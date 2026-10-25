@@ -1,6 +1,6 @@
 module github.com/lhg-projects/lhg-lanclip
 
-go 1.27.2
+go 1.26.0
 
 require github.com/grandcat/zeroconf v1.0.0
 

@@ -1,7 +1,7 @@
-# build output
-lanclip
-lanclip.exe
-dist/
+# build output (repo-root anchored so cmd/lanclip/ stays tracked)
+/lanclip
+/lanclip.exe
+/dist/
 
 # test / scratch
 *.partial

@@ -23,15 +23,12 @@ go build -o lanclip ./cmd/lanclip
 # 设备 A（比如电脑）
 ./lanclip serve
 
-# 设备 B（比如另一台电脑）
+# 设备 B（比如另一台电脑）——先配对，再启动：
+./lanclip key-import "$(在A上执行 lanclip key-export 输出的base64)"
 ./lanclip serve
-# 两台设备的 pairing PIN 必须一致才配对成功。
-# 把 A 的 group.key 拷到 B 的配置目录即完成配对：
-#   ~/Library/Application Support/lanclip/group.key
-#   → C:\Users\<you>\.config\lanclip\group.key
 ```
 
-配对后，两台设备上复制的文字/截图会自动互相同步。
+配对后两台设备显示相同的 `lanclip pin`（6 位校验码，务必人工确认一致），之后任意一台复制文字/截图都会自动同步到另一台。
 
 ### 手动发送
 
@@ -50,7 +47,7 @@ go build -o lanclip.exe ./cmd/lanclip
 lanclip.exe serve
 ```
 
-（Windows 端文本同步已实现；图片写入剪贴板使用 CF_DIBV5 转换，见 TODO。）
+（Windows 端文本与图片同步均已实现：图片走 CF_DIBV5 ↔ PNG 转换，覆盖 32bpp/24bpp 截图格式。）
 
 ### 测试/多实例
 
@@ -79,9 +76,10 @@ lanclip.exe serve
 | 身份认证 | TLS 1.3 + Hello 帧 HMAC-SHA256(groupKey)，握不过直接断开 |
 | 防回环/去重 | 每条剪贴板带 deviceID + 单调 version（unix nano），接收端按设备去重；发送端按内容哈希防自回声 |
 | 图片 | 图片以 image-ref 帧宣告，随后在**同一条连接**上流式拉取，不整包塞帧 |
-| 文件 | manifest 帧宣告一批文件 → 256KB 分块 + 每块 sha256 校验 → `.partial` 落盘 + 原子 rename |
+| 文件 | manifest 帧宣告一批文件 → 256KB 分块（逐块 sha256 + 严格顺序偏移校验）→ `.partial` 落盘 + 原子 rename + 整文件 sha256 终验 |
 | 大文件 | 发送端 `io.Copy` 流式读取，接收端边收边写，内存恒定 |
-| 配对 | 首台设备生成随机 group.key（32B），拷贝到新设备即配对；两端 PIN 相互确认（SAS） |
+| 配对 | 首台设备生成随机 group.key（32B），`key-export`/`key-import` 导入新设备；两端 PIN 相互确认（SAS） |
+| 认证 | Hello 帧的 HMAC 以 **TLS exporter** 为输入，绑定当前连接——中间人无法用自己的两条连接转发重放标签 |
 
 ## 交付范围与说明
 
@@ -98,18 +96,24 @@ lanclip.exe serve
 
 > 桌面端 serve 模式已经把接收方的文件落在 `received/` 目录，手机互传文件时接收路径同样适用。
 
+## 安全模型
+
+- **传输**：TLS 1.3（每安装一份自签证书），局域网内嗅探不可读。
+- **认证**：Hello 帧 HMAC = `HMAC(groupKey, "lanclip-hello-v2" || TLS-exporter || deviceID)`。因为 MAC 输入包含本连接的 TLS exporter 值，中间人各持一条 TLS 连接也无法把合法标签转发到自己的连接上使用——重放即失效。
+- **输入消毒**：远端文件名经 `SanitizeFileName` 压平为单一路径元素（拒绝 `../`、绝对路径、反斜杠、NUL），永远落不出 `received/` 目录。
+- **资源上限**：JSON 帧 ≤4MB；分块数据 ≤256KB（超出直接断开）；剪贴板图片 ≤32MB；文件走磁盘流式，无内存上限问题。
+
 ## 注意事项（大文件 / 内存）
 
-逆向微信输入法时发现它对剪贴板图片设了 100MB 上限（因为云中转路径必须缓存整个文件）。LanClip 走局域网直连 + 全程流式，理论上没有实际上限；当前保护措施：
+逆向微信输入法时发现它对剪贴板图片设了 100MB 上限（因为云中转路径必须缓存整个文件）。LanClip 走局域网直连 + 全程流式，文件传输理论上没有实际上限；当前保护措施：
 
 - 单帧 JSON（元数据）上限 4MB，文件内容**永远**不走 JSON 帧；
-- 256KB 分块逐块 ACK + sha256 校验，坏块直接报错终止；
+- 256KB 分块 + 逐块 sha256 + 严格顺序偏移校验 + 整文件 sha256 终验，坏块/乱序直接报错终止；
 - 接收端先写 `.partial` 再原子改名，中断不会留下半个可用文件；
 - 1MB 以上的纯文本建议走 `send-file`（文本内联上限 1MB）。
 
 ## 路线图
 
-- [ ] Windows 图片写入（CF_DIBV5）
 - [ ] 断点续传（已有 `.partial` 基础）
 - [ ] serve 模式本地 HTTP API（供 iOS 快捷指令 / Android 调用）
 - [ ] 菜单栏/托盘 GUI

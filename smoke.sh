@@ -63,7 +63,7 @@ print(base64.b64encode(png).decode())
 ")
 curl -s -X POST http://127.0.0.1:47718/api/shot \
   -H 'Content-Type: application/json' \
-  -d "{\"png_base64\": \"$PNG_B64\", \"name\": \"shot-test\"}" | tee /tmp/shot-resp.json | grep -q '"sent":1' \
+  -d "{\"png_base64\": \"$PNG_B64\", \"name\": \"shot-test\"}" | tee /tmp/shot-resp.json | grep -qE '"sent":[1-9]' \
   && echo "" || { echo "FAIL: /api/shot"; cat /tmp/shot-resp.json; exit 1; }
 sleep 1
 grep -q "收到图片" /tmp/lc-b.log && echo "PASS: B 收到截图推送" || { echo "FAIL: B 未收到图片"; tail -5 /tmp/lc-b.log; exit 1; }
@@ -73,7 +73,7 @@ echo "== 测试4: 本机 API /api/peers + /api/send-text =="
 curl -s http://127.0.0.1:47718/api/peers | grep -q "47727" && echo "PASS: peers 列出 B"
 BEFORE=$(grep -c "收到文本" /tmp/lc-a.log)
 curl -s -X POST http://127.0.0.1:47728/api/send-text -H 'Content-Type: application/json' \
-  -d '{"text":"api 回射测试"}' | grep -q '"sent":1' && echo "PASS: /api/send-text"
+  -d '{"text":"api 回射测试"}' | grep -qE '"sent":[1-9]' && echo "PASS: /api/send-text"
 sleep 2
 AFTER=$(grep -c "收到文本" /tmp/lc-a.log)
 [ "$AFTER" -gt "$BEFORE" ] && echo "PASS: A 收到 API 文本" || { echo "FAIL: A 未收到 API 文本"; tail -3 /tmp/lc-a.log; exit 1; }
