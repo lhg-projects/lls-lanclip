@@ -18,8 +18,8 @@ static NSInteger lastChangeCount = -2; // force initial read
 // when present; otherwise PNG/TIFF bytes are copied when present.
 // File copies (file URLs) are returned as a malloc'd array of
 // strdup'd UTF-8 paths in outFiles/outFileCount (caller frees each + array).
-BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen,
-                      char ***outFiles, int *outFileCount) {
+int clip_poll_darwin(char **outText, void **outData, int *dataLen,
+                    char ***outFiles, int *outFileCount) {
     @autoreleasepool {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         NSInteger cc = [pb changeCount];
@@ -87,7 +87,7 @@ BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen,
     }
 }
 
-BOOL clip_write_text_darwin(const char *text) {
+int clip_write_text_darwin(const char *text) {
     @autoreleasepool {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
         [pb clearContents];
@@ -99,7 +99,7 @@ BOOL clip_write_text_darwin(const char *text) {
 }
 
 // Writes PNG bytes as image on the pasteboard.
-BOOL clip_write_image_darwin(const void *pngData, int len) {
+int clip_write_image_darwin(const void *pngData, int len) {
     @autoreleasepool {
         NSData *png = [NSData dataWithBytes:pngData length:len];
         NSImage *img = [[NSImage alloc] initWithData:png];
@@ -134,7 +134,7 @@ func Poll() (Update, bool) {
 	var files **C.char
 	var nfiles C.int
 	ok := C.clip_poll_darwin(&text, &data, &dlen, &files, &nfiles)
-	if !ok {
+	if ok == 0 {
 		return Update{}, false
 	}
 	u := Update{}
@@ -163,7 +163,7 @@ func Poll() (Update, bool) {
 func WriteText(s string) bool {
 	ctext := C.CString(s)
 	defer C.free(unsafe.Pointer(ctext))
-	return bool(C.clip_write_text_darwin(ctext))
+	return C.clip_write_text_darwin(ctext) != 0
 }
 
 // WriteImage writes PNG bytes as the pasteboard image.
@@ -171,5 +171,5 @@ func WriteImage(png []byte) bool {
 	if len(png) == 0 {
 		return false
 	}
-	return bool(C.clip_write_image_darwin(unsafe.Pointer(&png[0]), C.int(len(png))))
+	return C.clip_write_image_darwin(unsafe.Pointer(&png[0]), C.int(len(png))) != 0
 }

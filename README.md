@@ -15,7 +15,23 @@ LanClip 是一个开源的、纯局域网的跨设备剪贴板同步工具。它
 
 ## 快速开始
 
-### macOS
+### macOS（安装包）
+
+从 [Releases](https://github.com/lhg-projects/lhg-lanclip/releases) 下载 `LanClip-x.y.z-universal.dmg`
+（或自行构建：`./scripts/macos-dmg.sh`），打开后把 **LanClip** 拖进 **Applications**，双击启动：
+
+- 它是菜单栏常驻应用（Dock 无图标），启动即进入剪贴板同步服务
+- 运行日志：`~/.config/lanclip/lanclip.log`（`tail -f` 可看收发记录）
+- 两台 Mac 都装好后，用 `lanclip key-export` / `key-import` 配对（见下）
+- 首次启动 macOS 会询问"本地网络"权限，点允许
+
+命令行工具与 .app 二进制相同：
+
+```bash
+/Applications/LanClip.app/Contents/MacOS/lanclip peers
+```
+
+### macOS（源码构建）
 
 ```bash
 # 构建（需要 Go 1.24+）

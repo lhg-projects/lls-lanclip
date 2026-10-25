@@ -102,7 +102,14 @@ func deviceName() string {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	// Double-clicked .app bundle: no args + running from Contents/MacOS ->
+	// become the background sync daemon (menu bar) and log to a file instead
+	// of a terminal that does not exist.
+	if len(os.Args) == 1 {
+		if exe, err := os.Executable(); err == nil && strings.Contains(exe, ".app/Contents/MacOS/") {
+			runAppBundleMode()
+			return
+		}
 		usage()
 		os.Exit(2)
 	}
@@ -206,6 +213,26 @@ func main() {
 }
 
 func printfStdout(format string, args ...any) { fmt.Printf(format+"\n", args...) }
+
+// runAppBundleMode redirects stdout/stderr into the config dir and serves.
+func runAppBundleMode() {
+	dir := configDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fatal(err)
+	}
+	logPath := filepath.Join(dir, "lanclip.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err == nil {
+		_ = syscall.Dup2(int(f.Fd()), 1)
+		_ = syscall.Dup2(int(f.Fd()), 2)
+	}
+	fmt.Printf("=== lanclip app mode, %s ===\n", time.Now().Format(time.RFC3339))
+	key, err := loadOrCreateGroupKey()
+	if err != nil {
+		fatal(err)
+	}
+	runServe(key, loadOrCreateDeviceID())
+}
 
 func usage() {
 	fmt.Fprint(os.Stderr, `lanclip — serverless LAN clipboard & file sync
