@@ -468,6 +468,7 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 		},
 	}
 	startWatcher(e, srv.peersFunc, stopWatch)
+	startShotWatcher(e, srv.peersFunc, stopWatch)
 
 	if apiPort := os.Getenv("LANCLIP_API_PORT"); apiPort != "" {
 		go serveAPI(e, apiPort, browser, deviceID)

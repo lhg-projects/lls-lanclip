@@ -7,7 +7,7 @@ LanClip 是一个开源的、纯局域网的跨设备剪贴板同步工具。它
 ## 功能
 
 - **文本同步**：任一设备复制文字，同组其他设备自动收到并写入剪贴板
-- **图片/截图同步**：手机截图 → 电脑剪贴板直接 ⌘V 粘贴；电脑截图 → 手机
+- **图片/截图同步**：剪贴板图片自动互传；**macOS 按 ⌘⇧3/⌘⇧4 的截图无需任何操作**——shotwatch 监听截图目录，新截图自动推到对端剪贴板（中英文文件名均可，老文件不重发，可用"同步截图/图片"开关一键停用）
 - **文件互传**：任意大小文件，流式分块传输（100MB 实测接收端内存恒定 ~24MB），**中断可续传**（接收端保留 `.partial`，重发时按已收字节数续传，实测 1GB 文件 500MB 处续传成功）
 - **菜单栏/托盘**（macOS/Windows）：实时显示对端数量、一键暂停/恢复同步、退出；`LANCLIP_NO_TRAY=1` 关闭
 - **自动发现**：mDNS/Bonjour 自动发现同局域网设备，扫码/输码都不需要
@@ -111,12 +111,18 @@ lanclip.exe serve
 - ✅ Windows：构建通过，文本同步可用；图片/文件路径代码与 macOS 共用，剪贴板图片写入待完善
 - ⏳ 手机端（Android/iOS）：见下
 
-## 手机端怎么接入？
+## 手机端现状与接入
 
-用户的核心场景是「手机截图 ↔ 电脑粘贴」。LanClip 的协议是开放的，手机端有两种接入方式：
+| 端 | 状态 | 说明 |
+|---|---|---|
+| Android | 🚧 仅骨架（`android/`） | 协议开放：`NsdManager` 发现 + TLS + `internal/protocol` 帧格式即可实现 |
+| iOS | ✅ 快捷指令可立即用 | iOS 系统禁止常驻剪贴板监听，官方路线是快捷指令 + 本机 HTTP API |
 
-1. **Android App（推荐路线）**：Android 原生可以直接用 `NsdManager`（mDNS）发现设备、`ClipboardManager` 监听剪贴板、普通 Socket + TLS 连接桌面端。协议里没有任何平台绑定，照着 `internal/protocol` 实现即可。
-2. **iOS**：由于 iOS 无法常驻监听剪贴板（系统限制），可做成分享扩展 / 快捷指令（Shortcuts）调用 `send-text`/`send-file` 的 HTTP 桥（可在 serve 模式下加一个本地 HTTP API）。
+**iPhone 现在就能用的路径**（无需装任何 App）：
+
+1. Mac 上启动 `LANCLIP_API_PORT=47719 lanclip serve`（或 .app 内设置后重启）
+2. iPhone「快捷指令」：截图 → 共享 → 运行指令：取最新截图 → Base64 编码 → POST `http://<Mac的IP>:47719/api/shot`，body `{"png_base64":"..."}` → Mac 剪贴板立刻可粘贴
+   （注：API 当前绑定 127.0.0.1，手机接入需放开为局域网地址并加组密钥校验——在路线图中）
 
 > 桌面端 serve 模式已经把接收方的文件落在 `received/` 目录，手机互传文件时接收路径同样适用。
 
@@ -154,6 +160,8 @@ lanclip.exe serve
 - [x] serve 模式本地 HTTP API（`LANCLIP_API_PORT`，/api/peers、/api/send-text、/api/shot）
 - [x] 菜单栏/托盘 GUI（v0.3，macOS/Windows）
 - [ ] 多设备并发推送（当前发送端逐台推送）
+- [ ] HTTP API 放开局域网访问 + 鉴权（供 iOS 快捷指令/Android 直连）
+- [ ] Windows 截图监听（PrintScreen / 捕获文件夹）
 
 ## 许可
 
