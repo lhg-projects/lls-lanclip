@@ -221,10 +221,12 @@ func runAppBundleMode() {
 		fatal(err)
 	}
 	logPath := filepath.Join(dir, "lanclip.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err == nil {
-		_ = syscall.Dup2(int(f.Fd()), 1)
-		_ = syscall.Dup2(int(f.Fd()), 2)
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		// fmt.Printf reads os.Stdout at call time, so reassigning the vars
+		// redirects all daemon logging into the file (no syscall needed,
+		// portable across darwin/windows/linux)
+		os.Stdout = f
+		os.Stderr = f
 	}
 	fmt.Printf("=== lanclip app mode, %s ===\n", time.Now().Format(time.RFC3339))
 	key, err := loadOrCreateGroupKey()
