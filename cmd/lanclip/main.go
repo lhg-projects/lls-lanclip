@@ -44,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lhg-projects/lhg-lanclip/internal/api"
 	"github.com/lhg-projects/lhg-lanclip/internal/clipboard"
 	"github.com/lhg-projects/lhg-lanclip/internal/crypto"
 	"github.com/lhg-projects/lhg-lanclip/internal/discovery"
@@ -53,7 +54,7 @@ import (
 	"github.com/lhg-projects/lhg-lanclip/internal/transfer"
 )
 
-const appVersion = "0.4.0"
+const appVersion = "0.5.0"
 
 // paused gates outbound clipboard pushes (toggled from the tray menu).
 var paused atomic.Bool
@@ -136,19 +137,21 @@ func main() {
 			fmt.Printf("%s\t%s\t%s\t%s\n", p.DeviceName, id, p.Platform, p.Addr)
 		}
 	case "send-text":
-		if len(os.Args) < 3 {
-			fatal(fmt.Errorf("usage: lanclip send-text TEXT"))
+		to, rest := pickTo(os.Args[2:])
+		if len(rest) == 0 {
+			fatal(fmt.Errorf("usage: lanclip send-text [--to 设备名/IP] TEXT"))
 		}
-		text := strings.Join(os.Args[2:], " ")
-		sendToPeers(key, deviceID, func(addr string, e *transfer.Engine) error {
+		text := strings.Join(rest, " ")
+		sendToPeers(key, deviceID, to, func(addr string, e *transfer.Engine) error {
 			return e.SendText(addr, text)
 		})
 	case "send-file":
-		if len(os.Args) < 3 {
-			fatal(fmt.Errorf("usage: lanclip send-file PATH [PATH...]"))
+		to, rest := pickTo(os.Args[2:])
+		if len(rest) == 0 {
+			fatal(fmt.Errorf("usage: lanclip send-file [--to 设备名/IP] PATH [PATH...]"))
 		}
-		sendToPeers(key, deviceID, func(addr string, e *transfer.Engine) error {
-			return e.SendFiles(addr, os.Args[2:])
+		sendToPeers(key, deviceID, to, func(addr string, e *transfer.Engine) error {
+			return e.SendFiles(addr, rest)
 		})
 	case "pin":
 		pin, err := crypto.DerivePINBytes(key)
@@ -306,8 +309,19 @@ func staticAndDiscovered(b *discovery.Browser) []discovery.Peer {
 	return out
 }
 
-// sendToPeers resolves peers (static first, else mDNS) and runs fn on each.
-func sendToPeers(groupKey []byte, deviceID string, fn func(addr string, e *transfer.Engine) error) {
+// pickTo extracts an optional --to/-t target from args.
+func pickTo(args []string) (to string, rest []string) {
+	rest = args
+	if len(rest) >= 2 && (rest[0] == "--to" || rest[0] == "-t") {
+		return rest[1], rest[2:]
+	}
+	return "", rest
+}
+
+// sendToPeers resolves peers (static first, else mDNS), optionally narrowed
+// by name/id/addr substring, and runs fn on each desktop peer; android peers
+// are routed through the HTTP face instead.
+func sendToPeers(groupKey []byte, deviceID, to string, fn func(addr string, e *transfer.Engine) error) {
 	e, err := transfer.NewEngine(transfer.Config{
 		DeviceID:   deviceID,
 		DeviceName: deviceName(),
@@ -340,6 +354,19 @@ func sendToPeers(groupKey []byte, deviceID string, fn func(addr string, e *trans
 	if len(targets) == 0 {
 		fatal(fmt.Errorf("no peer found on this network (is 'lanclip serve' running on the other device?)"))
 	}
+	if to != "" {
+		// narrow by name/id/addr substring
+		var narrow []string
+		for _, a := range targets {
+			if strings.Contains(a, to) {
+				narrow = append(narrow, a)
+			}
+		}
+		targets = narrow
+	}
+	if len(targets) == 0 {
+		fatal(fmt.Errorf("no peer matches %q (see `lanclip peers`)", to))
+	}
 	sent := 0
 	for _, addr := range targets {
 		if err := fn(addr, e); err != nil {
@@ -364,6 +391,8 @@ type serveStack struct {
 	peersFunc func() []discovery.Peer
 	stopWatch chan struct{}
 	cleanup   func()
+	// setEngineHook installs the inbox feed (see startServe's hookBox).
+	setEngineHook func(fn func(kind, from, text, name string, size int64, fileURL string))
 }
 
 // startServe brings up everything except the main-thread loop (tray/GUI/
@@ -395,6 +424,10 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 	fmt.Printf("lanclip %s serving as %q (platform=%s, port=%d)\n", appVersion, cur.DeviceName, runtime.GOOS, port)
 	fmt.Printf("pairing PIN (must match on both devices): %s\n", pin)
 
+	// hookBox feeds received items into the API inbox once serveAPI runs
+	hookBox := &struct {
+		fn func(kind, from, text, name string, size int64, fileURL string)
+	}{}
 	e, err := transfer.NewEngine(transfer.Config{
 		DeviceID:     deviceID,
 		DeviceName:   cur.DeviceName,
@@ -407,8 +440,14 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 			if clipboard.WriteText(text) {
 				fmt.Printf("收到文本 from %s: %.80q\n", from, text)
 			}
+			if hookBox.fn != nil {
+				hookBox.fn("text", from, text, "", 0, "")
+			}
 		},
 		OnClipboardImage: func(png []byte, from string) {
+			if hookBox.fn != nil {
+				hookBox.fn("image", from, "", "clipboard.png", int64(len(png)), "")
+			}
 			if clipboard.WriteImage(png) {
 				fmt.Printf("收到图片 from %s: %.1f KB -> 已写入剪贴板\n", from, float64(len(png))/1024)
 				return
@@ -422,6 +461,13 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 		},
 		OnFilesSaved: func(paths []string, from string) {
 			fmt.Printf("收到文件 from %s: %v\n", from, paths)
+			if hookBox.fn != nil {
+				for _, p := range paths {
+					if st, err := os.Stat(p); err == nil {
+						hookBox.fn("file", from, "", filepath.Base(p), st.Size(), "")
+					}
+				}
+			}
 		},
 		Logger: func(f string, a ...any) {
 			fmt.Printf("[debug] "+f+"\n", a...)
@@ -451,11 +497,14 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 	browser := discovery.NewBrowser()
 	stopWatch := make(chan struct{})
 	srv := &serveStack{
-		engine:    e,
-		browser:   browser,
-		settings:  st,
-		groupKey:  groupKey,
-		deviceID:  deviceID,
+		engine:   e,
+		browser:  browser,
+		settings: st,
+		groupKey: groupKey,
+		deviceID: deviceID,
+		setEngineHook: func(fn func(kind, from, text, name string, size int64, fileURL string)) {
+			hookBox.fn = fn
+		},
 		peersFunc: func() []discovery.Peer { return filterOutSelf(staticAndDiscovered(browser), deviceID) },
 		stopWatch: stopWatch,
 		cleanup: func() {
@@ -467,11 +516,11 @@ func startServe(groupKey []byte, deviceID string) *serveStack {
 			plain.Close()
 		},
 	}
-	startWatcher(e, srv.peersFunc, stopWatch)
-	startShotWatcher(e, srv.peersFunc, stopWatch)
+	startWatcher(srv, srv.peersFunc, stopWatch)
+	startShotWatcher(srv, srv.peersFunc, stopWatch)
 
 	if apiPort := os.Getenv("LANCLIP_API_PORT"); apiPort != "" {
-		go serveAPI(e, apiPort, browser, deviceID)
+		go serveAPI(srv, apiPort)
 	}
 	return srv
 }
@@ -491,7 +540,7 @@ func runServe(groupKey []byte, deviceID string) {
 			os.Exit(0)
 		}()
 		fmt.Println("tray: 菜单栏/托盘已启动（LANCLIP_NO_TRAY=1 可关闭）")
-		runTray(srv.engine, srv.peersFunc, &paused)
+		runTray(srv, &paused)
 		srv.cleanup()
 		return
 	}
@@ -500,12 +549,49 @@ func runServe(groupKey []byte, deviceID string) {
 	srv.cleanup()
 }
 
-// serveAPI runs the local HTTP API (for phone clients, shortcuts, smoke tests).
-func serveAPI(e *transfer.Engine, port string, b *discovery.Browser, selfID string) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(filterOutSelf(staticAndDiscovered(b), selfID))
+// apiRouter builds the authenticated LAN HTTP face: phones (no TLS exporter
+// in JSSE, no background clipboard) talk to these endpoints with the group
+// key; loopback callers stay exempt for local tooling and smoke tests.
+func apiRouter(srv *serveStack) (http.Handler, *api.Inbox) {
+	inbox := api.NewInbox(200)
+	e, b, selfID := srv.engine, srv.browser, srv.deviceID
+
+	srv.setEngineHook(func(kind, from, text, name string, size int64, fileURL string) {
+		inbox.Add(kind, from, text, name, size, fileURL)
 	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"app": "lanclip", "version": appVersion})
+	})
+	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(srv.peersFunc())
+	})
+	mux.HandleFunc("/api/inbox", func(w http.ResponseWriter, r *http.Request) {
+		since := int64(0)
+		if v := r.URL.Query().Get("since"); v != "" {
+			fmt.Sscanf(v, "%d", &since)
+		}
+		_ = json.NewEncoder(w).Encode(inbox.Since(since))
+	})
+
+	targets := func(to string) []discovery.Peer {
+		ps := srv.peersFunc()
+		if to == "" {
+			return ps
+		}
+		lto := strings.ToLower(to)
+		var out []discovery.Peer
+		for _, p := range ps {
+			if p.DeviceID == to || strings.HasPrefix(p.DeviceID, to) ||
+				p.Addr == to || strings.Contains(p.Addr, to) ||
+				strings.Contains(strings.ToLower(p.DeviceName), lto) {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
 	mux.HandleFunc("/api/send-text", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -513,18 +599,13 @@ func serveAPI(e *transfer.Engine, port string, b *discovery.Browser, selfID stri
 		}
 		var req struct {
 			Text string `json:"text"`
+			To   string `json:"to"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil || req.Text == "" {
 			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 			return
 		}
-		sent := 0
-		for _, p := range filterOutSelf(staticAndDiscovered(b), selfID) {
-			if err := e.SendText(p.Addr, req.Text); err == nil {
-				sent++
-			}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]int{"sent": sent})
+		_ = json.NewEncoder(w).Encode(map[string]any{"sent": sendTextTo(srv, targets(req.To), req.Text)})
 	})
 	mux.HandleFunc("/api/shot", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -534,6 +615,7 @@ func serveAPI(e *transfer.Engine, port string, b *discovery.Browser, selfID stri
 		var req struct {
 			PNGBase64 string `json:"png_base64"`
 			Name      string `json:"name"`
+			To        string `json:"to"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 40<<20)).Decode(&req); err != nil {
 			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
@@ -544,18 +626,158 @@ func serveAPI(e *transfer.Engine, port string, b *discovery.Browser, selfID stri
 			http.Error(w, `{"error":"bad png_base64"}`, http.StatusBadRequest)
 			return
 		}
-		sent := 0
-		for _, p := range filterOutSelf(staticAndDiscovered(b), selfID) {
-			if err := e.SendImage(p.Addr, png); err == nil {
-				sent++
-			}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]int{"sent": sent})
+		_ = json.NewEncoder(w).Encode(map[string]any{"sent": sendImageTo(srv, targets(req.To), png)})
 	})
-	fmt.Printf("local API listening on 127.0.0.1:%s (/api/peers, /api/send-text, /api/shot)\n", port)
-	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
+	mux.HandleFunc("/api/send-file", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, `{"error":"bad multipart"}`, http.StatusBadRequest)
+			return
+		}
+		to := r.FormValue("to")
+		fh := r.MultipartForm.File["file"]
+		if len(fh) == 0 {
+			http.Error(w, `{"error":"missing file"}`, http.StatusBadRequest)
+			return
+		}
+		f, err := fh[0].Open()
+		if err != nil {
+			http.Error(w, `{"error":"bad file part"}`, http.StatusBadRequest)
+			return
+		}
+		defer f.Close()
+		tmp, err := os.CreateTemp("", "lanclip-upload-*")
+		if err != nil {
+			http.Error(w, `{"error":"tmp"}`, http.StatusInternalServerError)
+			return
+		}
+		if _, err := io.Copy(tmp, f); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			http.Error(w, `{"error":"read"}`, http.StatusBadRequest)
+			return
+		}
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sent": sendFileTo(srv, targets(to), fh[0].Filename, tmp.Name()),
+		})
+	})
+	_ = e
+	_ = b
+	_ = selfID
+	return api.NewVerifier(srv.groupKey).Middleware(mux), inbox
+}
+
+// serveAPI runs the LAN HTTP face. LANCLIP_API_BIND=lan (or =IP) opens it to
+// the network; default stays loopback-only.
+func serveAPI(srv *serveStack, port string) {
+	handler, _ := apiRouter(srv)
+	bind := "127.0.0.1"
+	switch v := os.Getenv("LANCLIP_API_BIND"); v {
+	case "lan", "0.0.0.0":
+		bind = "0.0.0.0"
+	case "":
+	default:
+		bind = v
+	}
+	fmt.Printf("api: http://%s:%s (/api/ping /api/peers /api/send-text /api/shot /api/send-file /api/inbox)\n", bind, port)
+	if err := http.ListenAndServe(bind+":"+port, handler); err != nil {
 		fmt.Fprintln(os.Stderr, "api:", err)
 	}
+}
+
+// sendTextTo routes per-peer: desktop peers use the binary TLS protocol,
+// Android peers (mDNS platform=android) get HMAC-authed HTTP.
+func sendTextTo(srv *serveStack, ps []discovery.Peer, text string) int {
+	sent := 0
+	for _, p := range ps {
+		var err error
+		if p.Platform == "android" {
+			err = api.NewClient("http://"+p.Addr, srv.groupKey).SendText(text)
+		} else {
+			err = srv.engine.SendText(p.Addr, text)
+		}
+		if err == nil {
+			sent++
+		} else {
+			fmt.Fprintf(os.Stderr, "send text to %s(%s): %v\n", p.DeviceName, p.Platform, err)
+		}
+	}
+	return sent
+}
+
+func sendImageTo(srv *serveStack, ps []discovery.Peer, png []byte) int {
+	sent := 0
+	for _, p := range ps {
+		var err error
+		if p.Platform == "android" {
+			err = api.NewClient("http://"+p.Addr, srv.groupKey).SendImage(base64.StdEncoding.EncodeToString(png))
+		} else {
+			err = srv.engine.SendImage(p.Addr, png)
+		}
+		if err == nil {
+			sent++
+		} else {
+			fmt.Fprintf(os.Stderr, "send image to %s(%s): %v\n", p.DeviceName, p.Platform, err)
+		}
+	}
+	return sent
+}
+
+func sendFileTo(srv *serveStack, ps []discovery.Peer, name, path string) int {
+	sent := 0
+	for _, p := range ps {
+		var err error
+		if p.Platform == "android" {
+			content, rerr := os.ReadFile(path)
+			if rerr == nil {
+				err = api.NewClient("http://"+p.Addr, srv.groupKey).SendFile(name, content)
+			} else {
+				err = rerr
+			}
+		} else {
+			sendPath := path
+			if base := filepath.Base(path); base != name && name != "" {
+				// preserve the caller-supplied name (e.g. API uploads) by
+				// staging a hardlink/copy with the right basename
+				if d, derr := os.MkdirTemp("", "lanclip-name-*"); derr == nil {
+					staged := filepath.Join(d, transfer.SanitizeFileName(name))
+					if cerr := copyFile(staged, path); cerr == nil {
+						sendPath = staged
+						defer os.RemoveAll(d)
+					} else {
+						os.RemoveAll(d)
+					}
+				}
+			}
+			err = srv.engine.SendFiles(p.Addr, []string{sendPath})
+		}
+		if err == nil {
+			sent++
+		} else {
+			fmt.Fprintf(os.Stderr, "send file to %s(%s): %v\n", p.DeviceName, p.Platform, err)
+		}
+	}
+	return sent
+}
+
+func copyFile(dst, src string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func filterOutSelf(peers []discovery.Peer, selfID string) []discovery.Peer {
@@ -590,7 +812,7 @@ func syncEnabled(kind string) bool {
 	}
 }
 
-func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboard.Update) {
+func pushClipboard(srv *serveStack, peers func() []discovery.Peer, u clipboard.Update) {
 	if paused.Load() {
 		return
 	}
@@ -602,12 +824,11 @@ func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboar
 		if !syncEnabled("files") {
 			return
 		}
-		for _, p := range ps {
-			if err := e.SendFiles(p.Addr, u.Files); err != nil {
-				fmt.Fprintf(os.Stderr, "send files to %s: %v\n", p.DeviceName, err)
-			}
+		n := 0
+		for _, f := range u.Files {
+			n += sendFileTo(srv, ps, filepath.Base(f), f)
 		}
-		fmt.Printf("[-> files] %d file(s) to %d peer(s)\n", len(u.Files), len(ps))
+		fmt.Printf("[-> files] %d file(s) to %d peer(s)\n", n, len(ps))
 		return
 	}
 	if u.Text != "" {
@@ -619,24 +840,16 @@ func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboar
 			fmt.Printf("[skip] text over 1MB inline cap (%d bytes)\n", len(u.Text))
 			return
 		}
-		for _, p := range ps {
-			if err := e.SendText(p.Addr, u.Text); err != nil {
-				fmt.Fprintf(os.Stderr, "send text to %s: %v\n", p.DeviceName, err)
-			}
-		}
-		fmt.Printf("[-> clipboard] %.80q to %d peer(s)\n", u.Text, len(ps))
+		n := sendTextTo(srv, ps, u.Text)
+		fmt.Printf("[-> clipboard] %.80q to %d peer(s)\n", u.Text, n)
 		return
 	}
 	if len(u.PNGData) > 0 {
 		if !syncEnabled("images") {
 			return
 		}
-		for _, p := range ps {
-			if err := e.SendImage(p.Addr, u.PNGData); err != nil {
-				fmt.Fprintf(os.Stderr, "send image to %s: %v\n", p.DeviceName, err)
-			}
-		}
-		fmt.Printf("[-> image] %.1f KB to %d peer(s)\n", float64(len(u.PNGData))/1024, len(ps))
+		n := sendImageTo(srv, ps, u.PNGData)
+		fmt.Printf("[-> image] %.1f KB to %d peer(s)\n", float64(len(u.PNGData))/1024, n)
 	}
 }
 

@@ -45,6 +45,7 @@ func runGUI(srv *serveStack, firstRun bool) {
 	// ---------- live widgets ----------
 	statusLabel := widget.NewLabel("…")
 	pinLabel := widget.NewLabel("")
+	var sendSel *widget.Select
 	var peersList *widget.List
 	var filesList *widget.List
 	var peerObjs []discovery.Peer
@@ -62,6 +63,22 @@ func runGUI(srv *serveStack, firstRun bool) {
 		if peersList != nil {
 			peerObjs = srv.peersFunc()
 			peersList.Refresh()
+		}
+		if sendSel != nil {
+			names := make([]string, 0, len(peerObjs)+1)
+			cur := sendSel.Selected
+			for _, p := range srv.peersFunc() {
+				names = append(names, fmt.Sprintf("%s (%s)", p.DeviceName, p.Platform))
+			}
+			sendSel.Options = names
+			if cur != "" {
+				for _, n := range names {
+					if n == cur {
+						sendSel.SetSelected(cur)
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -143,6 +160,34 @@ func runGUI(srv *serveStack, firstRun bool) {
 	importBtn := widget.NewButton("导入密钥配对", func() {
 		go importKeyGUI(win, srv, keyEntry, pairLog)
 	})
+
+	// ---------- 发送文件到指定设备 ----------
+	sendSel = widget.NewSelect(nil, nil)
+	sendFileBtn := widget.NewButtonWithIcon("选择文件并发送到指定设备…", theme.MailSendIcon(), func() {
+		target := sendSel.Selected
+		if target == "" {
+			dialog.NewInformation("LanClip", "请先在下拉框选择目标设备", win).Show()
+			return
+		}
+		dialog.NewFileOpen(func(rc fyne.URIReadCloser, err error) {
+			if err != nil || rc == nil {
+				return
+			}
+			path := strings.TrimPrefix(rc.URI().Path(), "file://")
+			rc.Close()
+			go func() {
+				for _, p := range srv.peersFunc() {
+					if strings.Contains(p.DeviceName, target) || strings.Contains(p.Addr, target) {
+						if n := sendFileTo(srv, []discovery.Peer{p}, filepath.Base(path), path); n > 0 {
+							fmt.Printf("[gui -> file] %s → %s\n", filepath.Base(path), p.DeviceName)
+						}
+						return
+					}
+				}
+			}()
+		}, win).Show()
+	})
+	sendFileHint := widget.NewLabel("目标设备列表每 2 秒刷新")
 
 	// ---------- 已配对/在线设备列表 ----------
 	peersList = widget.NewList(
@@ -232,6 +277,7 @@ func runGUI(srv *serveStack, firstRun bool) {
 			importBtn,
 			pairLog),
 		widget.NewSeparator(),
+		card("发送文件", sendSel, sendFileBtn, sendFileHint),
 		card("在线设备", peersList),
 		widget.NewSeparator(),
 		card("收到的文件（"+filepath.Base(srv.settings.Get().SaveDir)+"）",

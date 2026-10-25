@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/lhg-projects/lhg-lanclip/internal/discovery"
-	"github.com/lhg-projects/lhg-lanclip/internal/transfer"
 )
 
 // The user-facing screenshot promise: press ⌘⇧3/⌘⇧4 on this Mac and every
@@ -51,7 +50,7 @@ func expandTilde(p string) string {
 }
 
 // startShotWatcher polls dir for settled new screenshot PNGs and pushes them.
-func startShotWatcher(e *transfer.Engine, peers func() []discovery.Peer, stop <-chan struct{}) {
+func startShotWatcher(srv *serveStack, peers func() []discovery.Peer, stop <-chan struct{}) {
 	dir := screenshotDir()
 	_ = os.MkdirAll(dir, 0o755)
 
@@ -108,7 +107,7 @@ func startShotWatcher(e *transfer.Engine, peers func() []discovery.Peer, stop <-
 					}
 					// settled and unseen: send
 					st.sent = true
-					pushShot(e, peers, filepath.Join(dir, name))
+					pushShot(srv, peers, filepath.Join(dir, name))
 				}
 				// bound the map
 				if len(known) > 500 {
@@ -135,7 +134,7 @@ func isShotCandidate(name string) bool {
 	return shotNameRe.MatchString(name)
 }
 
-func pushShot(e *transfer.Engine, peers func() []discovery.Peer, path string) {
+func pushShot(srv *serveStack, peers func() []discovery.Peer, path string) {
 	ps := peers()
 	if len(ps) == 0 {
 		return
@@ -144,14 +143,7 @@ func pushShot(e *transfer.Engine, peers func() []discovery.Peer, path string) {
 	if err != nil || len(png) == 0 {
 		return
 	}
-	ok := 0
-	for _, p := range ps {
-		if err := e.SendImage(p.Addr, png); err == nil {
-			ok++
-		} else {
-			fmt.Fprintf(os.Stderr, "shotwatch: send to %s: %v\n", p.DeviceName, err)
-		}
-	}
+	ok := sendImageTo(srv, ps, png)
 	if ok > 0 {
 		fmt.Printf("shotwatch: 截图 %s (%s KB) 已推送给 %d 台设备\n",
 			filepath.Base(path), strconv.FormatInt(int64(len(png))/1024, 10), ok)

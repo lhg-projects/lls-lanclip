@@ -1,28 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:padding="16dp">
+    android:layout_height="match_parent">
     <LinearLayout
         android:orientation="vertical"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:padding="16dp">
+
         <TextView android:id="@+id/tvStatus"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:textSize="16sp" android:text="状态：未启动" />
+            android:textSize="16sp" android:text="状态：未配对" />
         <TextView android:id="@+id/tvPin"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:textSize="28sp" android:text="PIN: ------"
-            android:layout_marginTop="12dp" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="对端设备（mDNS 自动发现，或手动添加 IP）"
-            android:layout_marginTop="16dp" />
-        <TextView android:id="@+id/tvPeers"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="(无)" />
+            android:textSize="20sp" android:text="PIN: ------"
+            android:layout_marginTop="8dp" />
+
         <LinearLayout android:orientation="horizontal"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="8dp">
+            android:layout_marginTop="12dp">
+            <Button android:id="@+id/btnStart"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="启动同步" />
+            <Button android:id="@+id/btnPair"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="配对" />
+        </LinearLayout>
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="目标设备（mDNS 自动发现 + 手动 IP）" />
+        <Spinner android:id="@+id/spPeers"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+        <LinearLayout android:orientation="horizontal"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp">
             <EditText android:id="@+id/etPeer"
                 android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:hint="192.168.1.10:47717" />
@@ -30,32 +41,28 @@
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:text="添加" />
         </LinearLayout>
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="配对（在电脑上运行 lanclip pair，把 PIN 填到下面）"
-            android:layout_marginTop="16dp" />
+
         <LinearLayout android:orientation="horizontal"
-            android:layout_width="match_parent" android:layout_height="wrap_content">
-            <EditText android:id="@+id/etPairHost"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp">
+            <Button android:id="@+id/btnSendClip"
                 android:layout_width="0dp" android:layout_weight="1"
-                android:layout_height="wrap_content" android:hint="电脑 IP" />
-            <EditText android:id="@+id/etPairPin"
+                android:layout_height="wrap_content" android:text="发送剪贴板" />
+            <Button android:id="@+id/btnPickFile"
                 android:layout_width="0dp" android:layout_weight="1"
-                android:layout_height="wrap_content" android:hint="6 位 PIN"
-                android:inputType="number" />
-            <Button android:id="@+id/btnPair"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="配对" />
+                android:layout_height="wrap_content" android:text="发送文件…" />
         </LinearLayout>
-        <Button android:id="@+id/btnVoice"
+
+        <Button android:id="@+id/btnLogs"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="🎤 语音输入（说完变文字同步）"
-            android:layout_marginTop="16dp" />
-        <TextView android:id="@+id/tvVoice"
+            android:layout_marginTop="12dp" android:text="查看收发记录" />
+        <TextView android:id="@+id/tvLog"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="" />
-        <Button android:id="@+id/btnToggle"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="启动同步服务"
-            android:layout_marginTop="16dp" />
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:background="#F0F0F0"
+            android:minHeight="120dp"
+            android:padding="8dp"
+            android:layout_marginTop="8dp" />
     </LinearLayout>
 </ScrollView>

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0 (2026-10-26)
+
+**三端互通（Mac ↔ Windows ↔ Android）**：
+
+- **Android 客户端**（Kotlin，`android/`）：前台服务（接收端口 47717）+ NSD mDNS 注册/发现
+  + 截图 ContentObserver 全自动推送（Pictures/Screenshots → 全部对端剪贴板/相册）
+  + 系统分享菜单收口（任何 App 的文本/图片/文件 → 选设备发送）+ App 内"发送剪贴板/发送文件"
+  + 接收落位：文本→剪贴板+通知、图片→相册 Pictures/lanclip、文件→Download/lanclip
+  + 配对：粘贴桌面端 `lanclip key-export` 输出，PIN 双端一致确认
+- **HTTP 面升级**（`internal/api`）：桌面守护进程 API 从 127.0.0.1 放开到局域网（`LANCLIP_API_BIND=lan`），
+  组密钥 HMAC 请求签名（`X-Lanclip-Ts` + `Authorization: LANCLIP …`，2 分钟时间窗，回环豁免）。
+  手机端 JSSE 拿不到 TLS exporter、系统禁止后台读剪贴板，因此**安卓对端统一走 HTTP 面**，
+  桌面对端仍走二进制 TLS 协议——发送端按 mDNS TXT `pt=android` 自动路由。
+- 新端点：`/api/send-file`（multipart 上传）、`/api/inbox?since=`（收件箱事件流）、`/api/ping`；
+  `/api/send-text`、`/api/shot` 支持定向 `{"to": "设备名/ID/IP"}`。
+- CLI：`send-text`/`send-file` 支持 `--to 设备名/IP` 定向发送。
+- 托盘（Mac/Win）：动态"发送文件到 <设备>"菜单（最多 8 台，3 秒刷新），系统原生文件选择器。
+- Mac 设置面板：新增"发送文件"卡片（设备下拉 + 文件选择）。
+
+**验证**：APK `assembleDebug` 编译通过（JDK17 + SDK34）；Go 17 项测试全绿；
+桌面双实例 + API 鉴权（正确/错误签名 200/401）+ 定向发送 + multipart 上传 + 收件箱全实测。
+Windows/Android 真机联调待用户执行（README 有步骤）。
+
+## 0.4.1 (2026-10-25)
+
 ## 0.4.1 (2026-10-25)
 
 **macOS 截图自动同步（shotwatch）**：普通 ⌘⇧3/⌘⇧4 截图不经过剪贴板，此前的"截图

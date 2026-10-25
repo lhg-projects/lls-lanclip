@@ -1,0 +1,15 @@
+R_DEF: Internal format may change without notice
+local
+id btnAddPeer
+id btnLogs
+id btnPair
+id btnPickFile
+id btnSendClip
+id btnStart
+id etPeer
+id spPeers
+id tvLog
+id tvPin
+id tvStatus
+layout activity_main
+string app_name

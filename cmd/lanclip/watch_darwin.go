@@ -7,13 +7,12 @@ import (
 
 	"github.com/lhg-projects/lhg-lanclip/internal/clipboard"
 	"github.com/lhg-projects/lhg-lanclip/internal/discovery"
-	"github.com/lhg-projects/lhg-lanclip/internal/transfer"
 )
 
 var lastPush uint64
 
 // startWatcher polls NSPasteboard changeCount (darwin) and pushes updates.
-func startWatcher(e *transfer.Engine, peers func() []discovery.Peer, stop <-chan struct{}) {
+func startWatcher(srv *serveStack, peers func() []discovery.Peer, stop <-chan struct{}) {
 	go func() {
 		for {
 			select {
@@ -29,7 +28,7 @@ func startWatcher(e *transfer.Engine, peers func() []discovery.Peer, stop <-chan
 					continue
 				}
 				lastPush = h
-				pushClipboard(e, peers, u)
+				pushClipboard(srv, peers, u)
 			}
 			time.Sleep(400 * time.Millisecond)
 		}

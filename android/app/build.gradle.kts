@@ -12,7 +12,7 @@ android {
         minSdk = 29 // TLS 1.3 需要 Android 10+
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.5.0"
     }
 
     buildTypes {
@@ -32,5 +32,7 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("androidx.activity:activity-ktx:1.9.2")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }

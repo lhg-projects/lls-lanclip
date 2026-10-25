@@ -115,14 +115,21 @@ lanclip.exe serve
 
 | 端 | 状态 | 说明 |
 |---|---|---|
-| Android | 🚧 仅骨架（`android/`） | 协议开放：`NsdManager` 发现 + TLS + `internal/protocol` 帧格式即可实现 |
-| iOS | ✅ 快捷指令可立即用 | iOS 系统禁止常驻剪贴板监听，官方路线是快捷指令 + 本机 HTTP API |
+| Android | ✅ **v0.5.0 客户端已实现**（`android/`） | 前台服务接收 + NSD 发现 + 截图自动推送 + 系统分享发送 + 配对；见下「Android 使用」 |
+| iOS | 暂不支持（按需求出局） | — |
 
-**iPhone 现在就能用的路径**（无需装任何 App）：
+### Android 使用（真机步骤）
 
-1. Mac 上启动 `LANCLIP_API_PORT=47719 lanclip serve`（或 .app 内设置后重启）
-2. iPhone「快捷指令」：截图 → 共享 → 运行指令：取最新截图 → Base64 编码 → POST `http://<Mac的IP>:47719/api/shot`，body `{"png_base64":"..."}` → Mac 剪贴板立刻可粘贴
-   （注：API 当前绑定 127.0.0.1，手机接入需放开为局域网地址并加组密钥校验——在路线图中）
+1. 电脑启动：`LANCLIP_API_PORT=47719 LANCLIP_API_BIND=lan lanclip serve`（或 .app + 环境变量）
+2. 电脑 `lanclip key-export` 复制输出的 base64 → App「配对」粘贴 → 两边 PIN 一致即成功
+3. App 点「启动同步」→ 授权通知/相册权限
+4. 手机截图 → 自动出现在电脑剪贴板（⌘V 粘贴）；电脑截图 → 手机相册 lanclip + 通知
+5. 电脑托盘菜单「发送文件到 <手机名>」选文件 → 手机 Download/lanclip
+6. 手机任何 App 分享 → LanClip → 选电脑 → 到达电脑剪贴板/收件目录
+
+（App 内"发送剪贴板"按钮补足安卓系统不允许后台读剪贴板的限制。）
+
+构建：`cd android && ./gradlew assembleDebug`（JDK 17 + Android SDK 34）。
 
 > 桌面端 serve 模式已经把接收方的文件落在 `received/` 目录，手机互传文件时接收路径同样适用。
 
@@ -160,8 +167,9 @@ lanclip.exe serve
 - [x] serve 模式本地 HTTP API（`LANCLIP_API_PORT`，/api/peers、/api/send-text、/api/shot）
 - [x] 菜单栏/托盘 GUI（v0.3，macOS/Windows）
 - [ ] 多设备并发推送（当前发送端逐台推送）
-- [ ] HTTP API 放开局域网访问 + 鉴权（供 iOS 快捷指令/Android 直连）
-- [ ] Windows 截图监听（PrintScreen / 捕获文件夹）
+- [x] HTTP API 放开局域网 + HMAC 鉴权（v0.5，Android 对端通道）
+- [x] Windows 截图监听（Pictures/Screenshots，v0.5）
+- [ ] Android 剪贴板服务化监听（系统限制，等方案：无障碍/输入法法）
 
 ## 许可
 
