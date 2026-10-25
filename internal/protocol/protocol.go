@@ -53,6 +53,10 @@ const (
 	MsgImageRef MsgType = "image_ref"
 	// MsgManifest announces files about to be sent.
 	MsgManifest MsgType = "manifest"
+	// MsgManifestAck (receiver -> sender, v0.3+) reports per-file resume
+	// offsets: bytes of each file the receiver already holds in .partial.
+	// A value equal to Size means "already complete, skip".
+	MsgManifestAck MsgType = "manifest_ack"
 	// MsgChunkData is a raw file chunk (outside JSON framing: header + bytes).
 	MsgChunkData MsgType = "chunk_data"
 	// MsgChunkAck acknowledges one chunk by offset.
@@ -90,6 +94,27 @@ type ImageRef struct {
 	SHA256   string `json:"sha256"`
 	Width    int    `json:"width,omitempty"`
 	Height   int    `json:"height,omitempty"`
+}
+
+// HelloOK confirms accepted identity; it echoes the SERVER's own identity so
+// the client learns the peer's version (used for protocol feature checks).
+type HelloOK struct {
+	OK         bool   `json:"ok"`
+	DeviceID   string `json:"device_id,omitempty"`
+	DeviceName string `json:"device_name,omitempty"`
+	Version    string `json:"version,omitempty"`
+}
+
+// FileOffset is one entry of a ManifestAck.
+type FileOffset struct {
+	FileID string `json:"file_id"`
+	Offset int64  `json:"offset"`
+}
+
+// ManifestAck is the receiver's reply to a manifest (v0.3+).
+type ManifestAck struct {
+	DeviceID string       `json:"device_id"`
+	Offsets  []FileOffset `json:"offsets"`
 }
 
 // FileEntry describes one file inside a manifest.

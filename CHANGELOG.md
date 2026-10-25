@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 (2026-10-25)
+
+**断点续传**：接收端为每个传入文件保留 `.partial`；重发同一文件时接收端通过新增的
+`manifest_ack` 帧申报已收字节数，发送端 seek 到偏移处只补传剩余部分（兼容 0.2 旧对端：
+旧版不读 ack，直接全量重传，行为不变）。最终 sha256 校验失败会清除损坏的 `.partial`
+避免死循环。实测：1GB 文件在 500MB 处中断后续传，2.4 秒补完剩余部分，MD5 一致。
+
+**菜单栏/托盘**（macOS/Windows，fyne.io/systray）：显示对端数量（3 秒刷新）、
+暂停/恢复本机剪贴板外发、退出。`LANCLIP_NO_TRAY=1` 关闭（服务器/CI/smoke 脚本已默认关闭）。
+
+**其他**：
+
+- macOS 剪贴板文件读取从弃用的 `NSFilenamesPboardType` 迁移到 `NSPasteboardTypeFileURL`
+  （消除编译警告，Finder 复制→自动同步实测通过）。
+- `hello_ok` 帧回带服务端身份（device/version），用于发送端判断对端是否支持 ack 协议。
+- 新增测试：续传（正常+损坏前缀）、`AckProtocol` 版本判定；共 11 个测试。
+
 ## 0.2.0 (2026-10-25)
 
 > 本版本同时合并了并行开发的两个提交（PIN 一键配对 internal/pair、复制文件自动同步

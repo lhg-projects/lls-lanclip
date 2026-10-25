@@ -1,6 +1,7 @@
 #!/bin/bash
 # 双实例冒烟测试：一台机器模拟两台设备（mDNS 在沙箱里可能不可用，用 LANCLIP_PEERS 直连）
 set -u
+export LANCLIP_NO_TRAY=1
 export PATH=$HOME/workspace/.tooling/go/bin:$PATH
 cd "$(dirname "$0")"
 

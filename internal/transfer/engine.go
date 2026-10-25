@@ -144,6 +144,16 @@ func selfSignedCert(deviceID string) (tls.Certificate, error) {
 	}, nil
 }
 
+// AckProtocol reports whether a peer version participates in the
+// manifest-ack resume handshake (v0.3.0 and later).
+func AckProtocol(peerVersion string) bool {
+	var maj, min int
+	if _, err := fmt.Sscanf(peerVersion, "%d.%d", &maj, &min); err != nil {
+		return false
+	}
+	return maj > 0 || min >= 3
+}
+
 type errStr string
 
 func (e errStr) Error() string { return string(e) }
@@ -305,7 +315,12 @@ func (e *Engine) handleInbound(raw net.Conn) {
 		c.sendJSON(protocol.MsgError, map[string]any{"reason": "auth"})
 		return
 	}
-	if err := c.sendJSON(protocol.MsgHelloOK, map[string]any{"ok": true}); err != nil {
+	if err := c.sendJSON(protocol.MsgHelloOK, protocol.HelloOK{
+		OK:         true,
+		DeviceID:   e.cfg.DeviceID,
+		DeviceName: e.cfg.DeviceName,
+		Version:    e.cfg.Version,
+	}); err != nil {
 		return
 	}
 	if e.cfg.OnPeerConnected != nil {
@@ -356,7 +371,7 @@ func (e *Engine) serve(c *conn, peer protocol.Hello) {
 				c.sendJSON(protocol.MsgError, map[string]any{"reason": "image too large"})
 				return
 			}
-			png, err := e.pullFile(c, m.FileID, m.Size, m.SHA256, "")
+			png, err := e.pullFile(c, m.FileID, m.Size, m.SHA256, "", 0)
 			if err != nil {
 				e.logf("pull image %s: %v", m.FileID, err)
 				return
@@ -370,16 +385,39 @@ func (e *Engine) serve(c *conn, peer protocol.Hello) {
 				return
 			}
 			paths := make([]string, 0, len(m.Files))
+			type job struct {
+				fe     protocol.FileEntry
+				dst    string
+				resume int64
+				done   bool
+			}
+			jobs := make([]job, 0, len(m.Files))
+			ack := protocol.ManifestAck{DeviceID: e.cfg.DeviceID}
 			for _, fe := range m.Files {
 				dst := filepath.Join(e.cfg.SaveDir, SanitizeFileName(fe.Name))
 				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 					return
 				}
-				if _, err := e.pullFile(c, fe.FileID, fe.Size, fe.SHA256, dst); err != nil {
-					e.logf("pull file %s: %v", fe.Name, err)
+				off := resumeOffset(dst, fe.Size)
+				ack.Offsets = append(ack.Offsets, protocol.FileOffset{FileID: fe.FileID, Offset: off})
+				j := job{fe: fe, dst: dst, resume: off, done: off >= fe.Size && fe.Size >= 0}
+				jobs = append(jobs, j)
+			}
+			// v0.3 handshake: tell the sender where to continue from
+			if err := c.sendJSON(protocol.MsgManifestAck, ack); err != nil {
+				return
+			}
+			for _, j := range jobs {
+				if j.done {
+					// receiver already holds the complete file
+					paths = append(paths, j.dst)
+					continue
+				}
+				if _, err := e.pullFile(c, j.fe.FileID, j.fe.Size, j.fe.SHA256, j.dst, j.resume); err != nil {
+					e.logf("pull file %s: %v", j.fe.Name, err)
 					return
 				}
-				paths = append(paths, dst)
+				paths = append(paths, j.dst)
 			}
 			if e.cfg.OnFilesSaved != nil {
 				e.cfg.OnFilesSaved(paths, peer.DeviceName)
@@ -416,7 +454,7 @@ func nextVersion() uint64 {
 
 // SendText broadcasts a text clipboard update to addr.
 func (e *Engine) SendText(addr, text string) error {
-	t, c, err := e.dialHello(addr)
+	t, c, _, err := e.dialHello(addr)
 	if err != nil {
 		return err
 	}
@@ -434,7 +472,7 @@ func (e *Engine) SendImage(addr string, png []byte) error {
 	if int64(len(png)) > protocol.MaxInlineImage {
 		return fmt.Errorf("image exceeds clipboard cap (%d > %d bytes)", len(png), protocol.MaxInlineImage)
 	}
-	t, c, err := e.dialHello(addr)
+	t, c, _, err := e.dialHello(addr)
 	if err != nil {
 		return err
 	}
@@ -456,7 +494,7 @@ func (e *Engine) SendImage(addr string, png []byte) error {
 
 // SendFiles streams a batch of files declared by a manifest.
 func (e *Engine) SendFiles(addr string, paths []string) error {
-	t, c, err := e.dialHello(addr)
+	t, c, peer, err := e.dialHello(addr)
 	if err != nil {
 		return err
 	}
@@ -504,30 +542,56 @@ func (e *Engine) SendFiles(addr string, paths []string) error {
 	if err := c.sendJSON(protocol.MsgManifest, manifest); err != nil {
 		return err
 	}
+	resume := map[string]int64{}
+	if AckProtocol(peer.Version) {
+		// v0.3+: the receiver answers with per-file resume offsets
+		var ack protocol.ManifestAck
+		if err := c.recvJSON(protocol.MsgManifestAck, &ack); err != nil {
+			return fmt.Errorf("manifest ack: %w", err)
+		}
+		for _, fo := range ack.Offsets {
+			if fo.Offset < 0 {
+				continue
+			}
+			for i := range manifest.Files {
+				if manifest.Files[i].FileID == fo.FileID && fo.Offset <= manifest.Files[i].Size {
+					resume[fo.FileID] = fo.Offset
+				}
+			}
+		}
+	}
 	for _, op := range ops {
-		if err := e.pushFileStream(c, op.fe, op.path); err != nil {
+		off := resume[op.fe.FileID]
+		if off >= op.fe.Size {
+			e.logf("file %s already complete on peer, skipping", op.fe.Name)
+			continue
+		}
+		if off > 0 {
+			e.logf("resuming %s at %d/%d bytes", op.fe.Name, off, op.fe.Size)
+		}
+		if err := e.pushFileStream(c, op.fe, op.path, off); err != nil {
 			return err
 		}
 	}
 	return c.sendJSON(protocol.MsgFileDone, map[string]any{})
 }
 
-func (e *Engine) dialHello(addr string) (*tls.Conn, *conn, error) {
+func (e *Engine) dialHello(addr string) (*tls.Conn, *conn, protocol.Hello, error) {
 	raw, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, protocol.Hello{}, err
 	}
 	t := tls.Client(raw, e.tlsCfg)
 	if err := t.Handshake(); err != nil {
 		raw.Close()
-		return nil, nil, err
+		return nil, nil, protocol.Hello{}, err
 	}
 	c := wrap(t)
 	st := t.ConnectionState()
 	exp, err := st.ExportKeyingMaterial(crypto.ExporterLabel, nil, 32)
 	if err != nil {
 		t.Close()
-		return nil, nil, err
+		return nil, nil, protocol.Hello{}, err
 	}
 	hello := protocol.Hello{
 		DeviceID:   e.cfg.DeviceID,
@@ -538,16 +602,15 @@ func (e *Engine) dialHello(addr string) (*tls.Conn, *conn, error) {
 	}
 	if err := c.sendJSON(protocol.MsgHello, hello); err != nil {
 		t.Close()
-		return nil, nil, err
+		return nil, nil, protocol.Hello{}, err
 	}
-	var ok struct {
-		OK bool `json:"ok"`
-	}
+	var ok protocol.HelloOK
 	if err := c.recvJSON(protocol.MsgHelloOK, &ok); err != nil || !ok.OK {
 		t.Close()
-		return nil, nil, fmt.Errorf("peer rejected hello")
+		return nil, nil, protocol.Hello{}, fmt.Errorf("peer rejected hello")
 	}
-	return t, c, nil
+	peer := protocol.Hello{DeviceID: ok.DeviceID, DeviceName: ok.DeviceName, Version: ok.Version}
+	return t, c, peer, nil
 }
 
 func (e *Engine) pushBytes(c *conn, fileID string, data []byte) error {
@@ -563,17 +626,23 @@ func (e *Engine) pushBytes(c *conn, fileID string, data []byte) error {
 	return nil
 }
 
-// pushFileStream streams a file from disk in fixed chunks, keeping memory
-// flat no matter the file size; reliability is TCP flow control + per-chunk
-// sha256 verified on receipt + whole-file sha256 at the end (report §6).
-func (e *Engine) pushFileStream(c *conn, fe protocol.FileEntry, path string) error {
+// pushFileStream streams a file from disk in fixed chunks starting at offset,
+// keeping memory flat no matter the file size; reliability is TCP flow
+// control + per-chunk sha256 verified on receipt + whole-file sha256 at the
+// end (report §6). Chunk header offsets continue from the resume point.
+func (e *Engine) pushFileStream(c *conn, fe protocol.FileEntry, path string, offset int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return err
+		}
+	}
 	buf := make([]byte, protocol.ChunkSize)
-	var off int64
+	off := offset
 	for {
 		n, rerr := f.Read(buf)
 		if n > 0 {
@@ -592,25 +661,66 @@ func (e *Engine) pushFileStream(c *conn, fe protocol.FileEntry, path string) err
 	return nil
 }
 
-// pullFile reads a streamed file. dst==nil buffers into memory (images);
-// otherwise it writes to dst+".partial" and renames atomically on completion.
-func (e *Engine) pullFile(c *conn, fileID string, size int64, wantSHA string, dst string) ([]byte, error) {
+// resumeOffset inspects an existing .partial (or completed dst) and returns
+// how many bytes of the announced file this device already holds. A partial
+// larger than the announced size (stale from another file) restarts at 0.
+func resumeOffset(dst string, size int64) int64 {
+	if st, err := os.Stat(dst); err == nil && !st.IsDir() {
+		if st.Size() == size {
+			return size // already complete
+		}
+		return 0 // name collision with different content: start over
+	}
+	if st, err := os.Stat(dst + ".partial"); err == nil && !st.IsDir() && st.Size() <= size {
+		return st.Size()
+	}
+	return 0
+}
+
+// pullFile reads a streamed file. dst=="" buffers into memory (images);
+// otherwise it appends to (or creates) dst+".partial" and renames atomically
+// on completion. resume is the byte offset the transfer continues from; the
+// bytes below it must already be on disk and are fed through the hash.
+func (e *Engine) pullFile(c *conn, fileID string, size int64, wantSHA string, dst string, resume int64) ([]byte, error) {
 	var buf []byte
 	var f *os.File
 	var h hash.Hash
 	if dst != "" {
-		pf, err := os.Create(dst + ".partial")
-		if err != nil {
-			return nil, err
+		if resume > 0 {
+			e.logf("resuming %s at %d/%d bytes", filepath.Base(dst), resume, size)
+			pf, err := os.OpenFile(dst+".partial", os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				return nil, err
+			}
+			f = pf
+			// feed the already-written prefix through the whole-file hash
+			hpref, err := os.Open(dst + ".partial")
+			if err != nil {
+				f.Close()
+				return nil, err
+			}
+			hr := sha256.New()
+			if _, err := io.Copy(hr, hpref); err != nil {
+				hpref.Close()
+				f.Close()
+				return nil, err
+			}
+			hpref.Close()
+			h = hr
+		} else {
+			pf, err := os.Create(dst + ".partial")
+			if err != nil {
+				return nil, err
+			}
+			f = pf
+			h = sha256.New()
 		}
-		f = pf
 		defer f.Close()
-		h = sha256.New()
 	} else {
 		buf = make([]byte, 0, size)
 		h = sha256.New()
 	}
-	var received int64
+	var received int64 = resume
 	for received < size {
 		_, offset, chunk, hashOK, err := c.recvChunk()
 		if err != nil {
@@ -637,6 +747,11 @@ func (e *Engine) pullFile(c *conn, fileID string, size int64, wantSHA string, ds
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantSHA != "" && got != wantSHA {
+		if dst != "" {
+			// the resumed prefix may be corrupt; drop it so the next
+			// attempt starts clean instead of failing forever
+			_ = os.Remove(dst + ".partial")
+		}
 		return nil, fmt.Errorf("file sha256 mismatch")
 	}
 	if f != nil {

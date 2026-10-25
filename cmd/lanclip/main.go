@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,7 +51,10 @@ import (
 	"github.com/lhg-projects/lhg-lanclip/internal/transfer"
 )
 
-const appVersion = "0.2.0"
+const appVersion = "0.3.0"
+
+// paused gates outbound clipboard pushes (toggled from the tray menu).
+var paused atomic.Bool
 
 func configDir() string {
 	if d := os.Getenv("LANCLIP_DIR"); d != "" {
@@ -392,6 +396,23 @@ func runServe(groupKey []byte, deviceID string) {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	if traySupported() && os.Getenv("LANCLIP_NO_TRAY") != "1" {
+		// tray must own the main goroutine on macOS; serve keeps running in
+		// its goroutines and Ctrl-C still exits via the signal shim below
+		go func() {
+			<-sig
+			close(stopWatch)
+			os.Exit(0)
+		}()
+		fmt.Println("tray: 菜单栏/托盘已启动（LANCLIP_NO_TRAY=1 可关闭）")
+		runTray(e, func() []discovery.Peer {
+			return filterOutSelf(staticAndDiscovered(browser), deviceID)
+		}, &paused)
+		close(stopWatch)
+		return
+	}
+
 	<-sig
 	close(stopWatch)
 }
@@ -468,6 +489,9 @@ func filterOutSelf(peers []discovery.Peer, selfID string) []discovery.Peer {
 // push text inline (capped), images as streamed refs, copied files as a
 // manifest batch — to every known peer.
 func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboard.Update) {
+	if paused.Load() {
+		return
+	}
 	ps := peers()
 	if len(ps) == 0 {
 		return

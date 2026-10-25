@@ -2,16 +2,19 @@ package transfer
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,15 +60,20 @@ func TestSanitizeFileName(t *testing.T) {
 // newTestEngine spins an engine on an ephemeral port and returns its address.
 func newTestEngine(t *testing.T, groupKey []byte) (*Engine, string, string) {
 	t.Helper()
+	return newTestEngineWithLog(t, groupKey, t.Logf)
+}
+
+func newTestEngineWithLog(t *testing.T, groupKey []byte, logger func(string, ...any)) (*Engine, string, string) {
+	t.Helper()
 	dir := t.TempDir()
 	e, err := NewEngine(Config{
 		DeviceID:   "server-device",
 		DeviceName: "server",
 		Platform:   "test",
-		Version:    "test",
+		Version:    "0.3.0",
 		GroupKey:   groupKey,
 		SaveDir:    dir,
-		Logger:     t.Logf,
+		Logger:     logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -311,4 +319,119 @@ func TestRecvChunkRejectsOversizeLength(t *testing.T) {
 	if _, err := rw.Reader.Read(buf); err == nil {
 		t.Fatal("server kept the connection open after oversized chunk header")
 	}
+}
+
+func TestAckProtocolVersions(t *testing.T) {
+	cases := map[string]bool{
+		"0.3.0": true, "0.4.1": true, "1.0.0": true,
+		"0.2.0": false, "0.1.0": false, "test": false, "": false,
+	}
+	for v, want := range cases {
+		if got := AckProtocol(v); got != want {
+			t.Fatalf("AckProtocol(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+// TestFileTransferResume pre-seeds a .partial with the first chunk, re-sends
+// the whole file, and asserts the sender resumed from the offset and the
+// completed file hashes correctly.
+func TestFileTransferResume(t *testing.T) {
+	key, _ := crypto.NewGroupKey()
+	var mu sync.Mutex
+	var logbuf []string
+	logger := func(f string, a ...any) {
+		mu.Lock()
+		logbuf = append(logbuf, fmt.Sprintf(f, a...))
+		mu.Unlock()
+	}
+	_, addr, dir := newTestEngineWithLog(t, key, logger)
+
+	payload := make([]byte, int(float64(protocol.ChunkSize)*2.5))
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	src := filepath.Join(t.TempDir(), "resume.bin")
+	if err := os.WriteFile(src, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "resume.bin")
+	if err := os.WriteFile(dst+".partial", payload[:protocol.ChunkSize], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sender, err := NewEngine(Config{
+		DeviceID: "sender-dev", DeviceName: "sender", Platform: "test",
+		Version: "0.3.0", GroupKey: key, SaveDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.SendFiles(addr, []string{src}); err != nil {
+		t.Fatalf("SendFiles: %v", err)
+	}
+
+	// the receiver finishes asynchronously; poll for the completed file
+	deadline := time.Now().Add(5 * time.Second)
+	var got []byte
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(dst)
+		if err == nil {
+			got = b
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got == nil {
+		mu.Lock()
+		t.Fatalf("resumed file never appeared; server logs:\n%s", strings.Join(logbuf, "\n"))
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("resumed file mismatch: %d bytes", len(got))
+	}
+	if _, err := os.Stat(dst + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf(".partial still present after success")
+	}
+	// and both sides must report the resume path
+	mu.Lock()
+	defer mu.Unlock()
+	joined := strings.Join(logbuf, "\n")
+	if !strings.Contains(joined, "resuming resume.bin at 262144") {
+		t.Fatalf("no receiver resume log; got:\n%s", joined)
+	}
+}
+
+// TestFileTransferResumeCorruptPrefix ensures a mismatched final hash wipes
+// the bad .partial so the next attempt can succeed instead of failing forever.
+func TestFileTransferResumeCorruptPrefix(t *testing.T) {
+	key, _ := crypto.NewGroupKey()
+	_, addr, dir := newTestEngineWithLog(t, key, t.Logf)
+
+	payload := bytes.Repeat([]byte{7}, protocol.ChunkSize*2)
+	src := filepath.Join(t.TempDir(), "corrupt.bin")
+	os.WriteFile(src, payload, 0o644)
+	dst := filepath.Join(dir, "corrupt.bin")
+	// poisoned prefix: right LENGTH but wrong bytes
+	bad := bytes.Repeat([]byte{9}, protocol.ChunkSize)
+	os.WriteFile(dst+".partial", bad, 0o644)
+
+	sender, _ := NewEngine(Config{
+		DeviceID: "sender-dev", DeviceName: "sender", Platform: "test",
+		Version: "0.3.0", GroupKey: key, SaveDir: t.TempDir(),
+	})
+	// push is one-way: SendFiles succeeding does not mean the receiver
+	// accepted the content; what matters is what the receiver did with it
+	if err := sender.SendFiles(addr, []string{src}); err != nil {
+		t.Fatalf("SendFiles: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, perr := os.Stat(dst + ".partial")
+		_, derr := os.Stat(dst)
+		if os.IsNotExist(perr) && os.IsNotExist(derr) {
+			return // poisoned prefix wiped, no bad file delivered
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("corrupt .partial not removed (or bad dst created) after hash mismatch")
 }

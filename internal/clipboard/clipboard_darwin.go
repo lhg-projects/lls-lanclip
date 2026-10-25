@@ -16,7 +16,7 @@ static NSInteger lastChangeCount = -2; // force initial read
 
 // Returns YES if the pasteboard changed since the last poll. Text is copied
 // when present; otherwise PNG/TIFF bytes are copied when present.
-// File copies (NSFilenamesPboardType) are returned as a malloc'd array of
+// File copies (file URLs) are returned as a malloc'd array of
 // strdup'd UTF-8 paths in outFiles/outFileCount (caller frees each + array).
 BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen,
                       char ***outFiles, int *outFileCount) {
@@ -43,9 +43,20 @@ BOOL clip_poll_darwin(char **outText, void **outData, int *dataLen,
                 png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
             }
         }
-        NSArray<NSString *> *filePaths = nil;
-        if ([pb.types containsObject:NSFilenamesPboardType]) {
-            filePaths = [pb propertyListForType:NSFilenamesPboardType];
+        // modern file URL reading (NSFilenamesPboardType is deprecated)
+        NSArray<NSURL *> *fileURLs = nil;
+        if ([pb.types containsObject:NSPasteboardTypeFileURL]) {
+            fileURLs = [pb readObjectsForClasses:@[[NSURL class]]
+                                          options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+        }
+        NSMutableArray<NSString *> *filePaths = nil;
+        if (fileURLs.count > 0) {
+            filePaths = [NSMutableArray arrayWithCapacity:fileURLs.count];
+            for (NSURL *u in fileURLs) {
+                if (u.fileURL && u.path) {
+                    [filePaths addObject:u.path];
+                }
+            }
         }
         BOOL changed = NO;
         if (text) {
@@ -112,7 +123,7 @@ import (
 type Update struct {
 	Text    string
 	PNGData []byte   // non-nil when the change carried an image
-	Files   []string // local file paths when files were copied (NSFilenamesPboardType)
+	Files   []string // local file paths when files were copied (Finder file URLs)
 }
 
 // Poll returns the new clipboard contents if changeCount moved, else ok=false.
