@@ -21,6 +21,13 @@ LanClip 是一个开源的、纯局域网的跨设备剪贴板同步工具。它
 （或自行构建：`./scripts/macos-dmg.sh`），打开后把 **LanClip** 拖进 **Applications**，双击启动：
 
 - 它是菜单栏常驻应用（Dock 无图标），启动即进入剪贴板同步服务
+- **首次启动会自动弹出设置面板**；之后随时从菜单栏图标 → 「打开设置面板…」进入
+- 设置面板功能：
+  - 状态与配对校验码（PIN）一览
+  - 同步开关：文本 / 截图图片 / 复制文件，实时生效
+  - 收件目录选择、本机设备名修改
+  - 一键生成 5 分钟一次性配对码，或粘贴 base64 密钥导入配对
+  - 在线设备列表（实时刷新）；收到的文件列表（可一键在 Finder 中显示）
 - 运行日志：`~/.config/lanclip/lanclip.log`（`tail -f` 可看收发记录）
 - 两台 Mac 都装好后，用 `lanclip key-export` / `key-import` 配对（见下）
 - 首次启动 macOS 会询问"本地网络"权限，点允许
@@ -122,6 +129,7 @@ lanclip.exe serve
 | `LANCLIP_API_PORT` | 本地 HTTP API 端口（手机/快捷指令接入） | 未启用 |
 | `LANCLIP_PEERS` | 静态对端地址（逗号分隔，mDNS 不可用时兜底） | 未启用 |
 | `LANCLIP_NO_TRAY` | `1` = 不启动菜单栏/托盘（服务器/CI 场景） | 未设置 |
+| `LANCLIP_NO_GUI` | `1` = .app 模式下退回纯托盘（无设置面板） | 未设置 |
 | `LANCLIP_INSECURE_OPEN` | `1` = 接受未配对设备（**不建议**） | 未设置 |
 
 ## 安全模型

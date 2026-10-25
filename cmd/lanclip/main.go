@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -48,10 +49,11 @@ import (
 	"github.com/lhg-projects/lhg-lanclip/internal/discovery"
 	"github.com/lhg-projects/lhg-lanclip/internal/pair"
 	"github.com/lhg-projects/lhg-lanclip/internal/protocol"
+	"github.com/lhg-projects/lhg-lanclip/internal/settings"
 	"github.com/lhg-projects/lhg-lanclip/internal/transfer"
 )
 
-const appVersion = "0.3.0"
+const appVersion = "0.4.0"
 
 // paused gates outbound clipboard pushes (toggled from the tray menu).
 var paused atomic.Bool
@@ -233,7 +235,16 @@ func runAppBundleMode() {
 	if err != nil {
 		fatal(err)
 	}
-	runServe(key, loadOrCreateDeviceID())
+	deviceID := loadOrCreateDeviceID()
+	if guiSupported() && os.Getenv("LANCLIP_NO_GUI") != "1" {
+		_, serr := os.Stat(filepath.Join(configDir(), "settings.json"))
+		firstRun := os.IsNotExist(serr)
+		srv := startServe(key, deviceID)
+		runGUI(srv, firstRun) // blocks the main goroutine (GUI runloop)
+		srv.cleanup()
+		return
+	}
+	runServe(key, deviceID)
 }
 
 func usage() {
@@ -343,8 +354,34 @@ func sendToPeers(groupKey []byte, deviceID string, fn func(addr string, e *trans
 	}
 }
 
-func runServe(groupKey []byte, deviceID string) {
-	saveDir := filepath.Join(configDir(), "received")
+// serveStack bundles the running daemon's handles for UI/tray consumers.
+type serveStack struct {
+	engine    *transfer.Engine
+	browser   *discovery.Browser
+	settings  *settings.Store
+	groupKey  []byte
+	deviceID  string
+	peersFunc func() []discovery.Peer
+	stopWatch chan struct{}
+	cleanup   func()
+}
+
+// startServe brings up everything except the main-thread loop (tray/GUI/
+// signal wait): engine, TLS listener, mDNS announce/browse, clipboard
+// watcher, optional HTTP API. Call cleanup() on shutdown.
+func startServe(groupKey []byte, deviceID string) *serveStack {
+	st, err := settings.Load(configDir(), filepath.Join(configDir(), "received"), deviceName())
+	if err != nil {
+		fatal(err)
+	}
+	cur := st.Get()
+	syncPrefs.mu.Lock()
+	syncPrefs.text, syncPrefs.images, syncPrefs.files = cur.SyncText, cur.SyncImages, cur.SyncFiles
+	syncPrefs.mu.Unlock()
+	saveDir := cur.SaveDir
+	if saveDir == "" {
+		saveDir = filepath.Join(configDir(), "received")
+	}
 	if err := os.MkdirAll(saveDir, 0o755); err != nil {
 		fatal(err)
 	}
@@ -355,12 +392,12 @@ func runServe(groupKey []byte, deviceID string) {
 	}
 
 	pin, _ := crypto.DerivePINBytes(groupKey)
-	fmt.Printf("lanclip %s serving as %q (platform=%s, port=%d)\n", appVersion, deviceName(), runtime.GOOS, port)
+	fmt.Printf("lanclip %s serving as %q (platform=%s, port=%d)\n", appVersion, cur.DeviceName, runtime.GOOS, port)
 	fmt.Printf("pairing PIN (must match on both devices): %s\n", pin)
 
 	e, err := transfer.NewEngine(transfer.Config{
 		DeviceID:     deviceID,
-		DeviceName:   deviceName(),
+		DeviceName:   cur.DeviceName,
 		Platform:     runtime.GOOS,
 		Version:      appVersion,
 		GroupKey:     groupKey,
@@ -398,31 +435,49 @@ func runServe(groupKey []byte, deviceID string) {
 	if err != nil {
 		fatal(err)
 	}
-	tlsLn := plain // engine wraps each accepted conn with TLS itself (e.Listen)
-
-	ann, err := discovery.Announce(deviceID, deviceName()+"-"+deviceID[:6], runtime.GOOS, appVersion, port)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mDNS announce failed (LANCLIP_PEERS can compensate):", err)
-	}
-	defer func() { ann.Close() }()
-
-	browser := discovery.NewBrowser()
-	defer browser.Stop()
-
-	stopWatch := make(chan struct{})
-	startWatcher(e, func() []discovery.Peer { return filterOutSelf(staticAndDiscovered(browser), deviceID) }, stopWatch)
-
-	if apiPort := os.Getenv("LANCLIP_API_PORT"); apiPort != "" {
-		go serveAPI(e, apiPort, browser, deviceID)
-	}
-
 	go func() {
-		if err := e.Listen(tlsLn); err != nil {
+		if err := e.Listen(plain); err != nil { // engine wraps TLS per conn
 			fmt.Fprintln(os.Stderr, "listen:", err)
 			os.Exit(1)
 		}
 	}()
 
+	annName := cur.DeviceName + "-" + deviceID[:6]
+	ann, err := discovery.Announce(deviceID, annName, runtime.GOOS, appVersion, port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mDNS announce failed (LANCLIP_PEERS can compensate):", err)
+	}
+
+	browser := discovery.NewBrowser()
+	stopWatch := make(chan struct{})
+	srv := &serveStack{
+		engine:    e,
+		browser:   browser,
+		settings:  st,
+		groupKey:  groupKey,
+		deviceID:  deviceID,
+		peersFunc: func() []discovery.Peer { return filterOutSelf(staticAndDiscovered(browser), deviceID) },
+		stopWatch: stopWatch,
+		cleanup: func() {
+			close(stopWatch)
+			browser.Stop()
+			if ann != nil {
+				ann.Close()
+			}
+			plain.Close()
+		},
+	}
+	startWatcher(e, srv.peersFunc, stopWatch)
+
+	if apiPort := os.Getenv("LANCLIP_API_PORT"); apiPort != "" {
+		go serveAPI(e, apiPort, browser, deviceID)
+	}
+	return srv
+}
+
+// runServe is the CLI daemon entry: background stack + tray or signal wait.
+func runServe(groupKey []byte, deviceID string) {
+	srv := startServe(groupKey, deviceID)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -431,19 +486,17 @@ func runServe(groupKey []byte, deviceID string) {
 		// its goroutines and Ctrl-C still exits via the signal shim below
 		go func() {
 			<-sig
-			close(stopWatch)
+			srv.cleanup()
 			os.Exit(0)
 		}()
 		fmt.Println("tray: 菜单栏/托盘已启动（LANCLIP_NO_TRAY=1 可关闭）")
-		runTray(e, func() []discovery.Peer {
-			return filterOutSelf(staticAndDiscovered(browser), deviceID)
-		}, &paused)
-		close(stopWatch)
+		runTray(srv.engine, srv.peersFunc, &paused)
+		srv.cleanup()
 		return
 	}
 
 	<-sig
-	close(stopWatch)
+	srv.cleanup()
 }
 
 // serveAPI runs the local HTTP API (for phone clients, shortcuts, smoke tests).
@@ -517,6 +570,25 @@ func filterOutSelf(peers []discovery.Peer, selfID string) []discovery.Peer {
 // pushClipboard mirrors WeType's MultiCopy flow: on local clipboard change,
 // push text inline (capped), images as streamed refs, copied files as a
 // manifest batch — to every known peer.
+// syncPrefs mirrors the settings store for the hot path (updated by the GUI).
+var syncPrefs struct {
+	mu                  sync.RWMutex
+	text, images, files bool
+}
+
+func syncEnabled(kind string) bool {
+	syncPrefs.mu.RLock()
+	defer syncPrefs.mu.RUnlock()
+	switch kind {
+	case "text":
+		return syncPrefs.text
+	case "images":
+		return syncPrefs.images
+	default:
+		return syncPrefs.files
+	}
+}
+
 func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboard.Update) {
 	if paused.Load() {
 		return
@@ -526,6 +598,9 @@ func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboar
 		return
 	}
 	if len(u.Files) > 0 {
+		if !syncEnabled("files") {
+			return
+		}
 		for _, p := range ps {
 			if err := e.SendFiles(p.Addr, u.Files); err != nil {
 				fmt.Fprintf(os.Stderr, "send files to %s: %v\n", p.DeviceName, err)
@@ -535,6 +610,9 @@ func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboar
 		return
 	}
 	if u.Text != "" {
+		if !syncEnabled("text") {
+			return
+		}
 		const maxInline = 1 << 20 // 1MB inline text cap; larger content should be sent as a file
 		if len(u.Text) > maxInline {
 			fmt.Printf("[skip] text over 1MB inline cap (%d bytes)\n", len(u.Text))
@@ -549,6 +627,9 @@ func pushClipboard(e *transfer.Engine, peers func() []discovery.Peer, u clipboar
 		return
 	}
 	if len(u.PNGData) > 0 {
+		if !syncEnabled("images") {
+			return
+		}
 		for _, p := range ps {
 			if err := e.SendImage(p.Addr, u.PNGData); err != nil {
 				fmt.Fprintf(os.Stderr, "send image to %s: %v\n", p.DeviceName, err)
