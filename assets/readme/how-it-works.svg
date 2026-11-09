@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="300" viewBox="0 0 1200 300"
+     role="img" aria-labelledby="title desc">
+  <title id="title">LanClip 是怎么工作的：复制、加密握手、局域网直传、粘贴</title>
+  <desc id="desc">四步流程：任一设备复制；组密钥加 TLS 1.3 握手，陌生设备无法接入；mDNS 发现对端后在局域网内分块直传，每块 sha256 校验；对端剪贴板即刻可用，文件落入 received 目录。</desc>
+
+  <rect width="1200" height="300" rx="26" fill="#0F1714"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">
+    <!-- step 1 -->
+    <g>
+      <rect x="48" y="56" width="240" height="180" rx="14" fill="#182420" stroke="#2E4238" stroke-width="2"/>
+      <text x="72" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#35C48D">STEP 1</text>
+      <text x="72" y="140" font-size="26" font-weight="700" fill="#F2F5F1">复制</text>
+      <text x="72" y="176" font-size="18" fill="#9DB0A6">任一设备复制</text>
+      <text x="72" y="204" font-size="18" fill="#9DB0A6">文本、截图或文件</text>
+    </g>
+    <path d="M 296 146 L 322 146 M 314 138 L 324 146 L 314 154" fill="none" stroke="#35C48D" stroke-width="2.5"/>
+
+    <!-- step 2 -->
+    <g>
+      <rect x="336" y="56" width="240" height="180" rx="14" fill="#182420" stroke="#2E4238" stroke-width="2"/>
+      <text x="360" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#35C48D">STEP 2</text>
+      <text x="360" y="140" font-size="26" font-weight="700" fill="#F2F5F1">加密握手</text>
+      <text x="360" y="176" font-size="18" fill="#9DB0A6">组密钥 HMAC + TLS 1.3</text>
+      <text x="360" y="204" font-size="18" fill="#9DB0A6">陌生设备无法接入</text>
+    </g>
+    <path d="M 584 146 L 610 146 M 602 138 L 612 146 L 602 154" fill="none" stroke="#35C48D" stroke-width="2.5"/>
+
+    <!-- step 3 -->
+    <g>
+      <rect x="624" y="56" width="240" height="180" rx="14" fill="#182420" stroke="#2E4238" stroke-width="2"/>
+      <text x="648" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#35C48D">STEP 3</text>
+      <text x="648" y="140" font-size="26" font-weight="700" fill="#F2F5F1">局域网直传</text>
+      <text x="648" y="176" font-size="18" fill="#9DB0A6">mDNS 自动发现对端</text>
+      <text x="648" y="204" font-size="18" fill="#9DB0A6">256 KB 分块 + sha256</text>
+    </g>
+    <path d="M 872 146 L 898 146 M 890 138 L 900 146 L 890 154" fill="none" stroke="#35C48D" stroke-width="2.5"/>
+
+    <!-- step 4 -->
+    <g>
+      <rect x="912" y="56" width="240" height="180" rx="14" fill="#182420" stroke="#2E4238" stroke-width="2"/>
+      <text x="936" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#35C48D">STEP 4</text>
+      <text x="936" y="140" font-size="26" font-weight="700" fill="#F2F5F1">粘贴</text>
+      <text x="936" y="176" font-size="18" fill="#9DB0A6">对端剪贴板即刻可用</text>
+      <text x="936" y="204" font-size="18" fill="#9DB0A6">文件落入 received/</text>
+    </g>
+
+    <text x="600" y="276" text-anchor="middle" font-size="18" fill="#8A9A92">全程不经过服务器；中断可续传，接收端保留 .partial</text>
+  </g>
+</svg>
